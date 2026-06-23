@@ -188,6 +188,70 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 - Not an IDP — does not issue tokens, manage sessions, or handle human login
 - Not a PDS — does not store ATProto records or serve a firehose
 - Not a key custodian — private keys never reach the registry
+- Not an OID4VP holder — does not run the presentation protocol; see below
+
+---
+
+## PingOne Neo / OID4VC compatibility
+
+The registry produces credentials in the right formats for Neo.  What it does
+**not** do is drive the OID4VP presentation flow — that is the consumer's job.
+
+### What this registry provides
+
+| Format | Endpoint | Use |
+|--------|----------|-----|
+| `ldp_vc` | `GET /agents/{id}/charter` | Watershed / agent-to-agent trust |
+| `jwt_vc` | `GET /agents/{id}/charter?format=jwt_vc` | OID4VC issuance to a wallet |
+| `sd_jwt_vc` | `GET /agents/{id}/charter?format=sd_jwt_vc` | Selective disclosure presentation |
+
+Both JWT formats include `cnf.jwk` binding the credential to the agent's public
+key, which is what Neo's verifier checks during Key Binding JWT verification.
+
+### What the OID4VP holder (consumer) must implement
+
+Neo does not expose a "submit credential blob" endpoint.  Verification is
+initiated by the verifier and the holder must respond to a presentation request:
+
+```
+1.  Verifier starts a session:
+      POST /v1/environments/{envID}/presentationSessions
+           protocol=OPENID4VP
+    → returns request_uri / appOpenUrl
+
+2.  Holder fetches the signed presentation request object from request_uri
+    → contains nonce, aud (client_id), presentation_definition
+
+3.  Holder selects matching credential (the sd_jwt_vc or jwt_vc from this registry)
+    and constructs the response:
+
+    For sd_jwt_vc:
+      sd_jwt_presentation = present_sd_jwt(did, audience=aud, nonce=nonce)
+      # <JWT>~<Disc1>~...~<KB-JWT>
+
+    For jwt_vc:
+      vp_jwt = present_jwt(did, audience=aud, nonce=nonce)
+      # compact JWT VP containing the vc+jwt
+
+4.  Holder POSTs the vp_token to the verifier's response_uri
+
+5.  Verifier checks:
+      - KB-JWT / VP-JWT signature against cnf.jwk in the credential
+      - Credential signature against registry's DID document
+      - nonce, aud, sd_hash (for SD-JWT)
+      - presentation_definition constraints
+```
+
+`registry_client.present_jwt()` and `registry_client.present_sd_jwt()` produce
+the correct `vp_token` strings for steps 3–4.  Everything else in the flow
+(fetching `request_uri`, parsing `presentation_definition`, POSTing back) belongs
+in the consuming agent.
+
+### Separate consumer repo
+
+The OID4VP holder logic — provisioning this registry, then answering a Neo
+presentation request — is implemented in a separate repo so that the registry
+stays focused on identity issuance rather than protocol orchestration.
 
 ---
 
