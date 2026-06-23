@@ -13,9 +13,9 @@ DELETE /agents/{agent_id}           Revocation
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from sqlmodel import Session, select
 
 from app.config import REGISTRY_DOMAIN, REGISTRY_KEY_PATH
@@ -182,15 +182,66 @@ def get_agent_did_document(agent_id: str, session: SessionDep) -> Response:
     summary="Agent charter VC",
     tags=["Agents"],
 )
-def get_agent_charter(agent_id: str, session: SessionDep) -> Response:
-    """Return the agent's signed charter as a W3C Verifiable Credential."""
+def get_agent_charter(
+    agent_id: str,
+    session: SessionDep,
+    format: Literal["ldp_vc", "jwt_vc", "sd_jwt_vc"] = Query(
+        default="ldp_vc",
+        description=(
+            "ldp_vc   — JSON-LD with Data Integrity Proof (default)\n"
+            "jwt_vc   — W3C VC Data Model v2, JWT-secured (vc+jwt)\n"
+            "sd_jwt_vc — SD-JWT-VC with selective disclosure (vc+sd-jwt)"
+        ),
+    ),
+) -> Response:
+    """
+    Return the agent's signed charter credential.
+
+    Use **?format=jwt_vc** or **?format=sd_jwt_vc** for Neo / OID4VC flows.
+    The default (ldp_vc) is the JSON-LD + Data Integrity Proof form used by
+    the registry's own verify / present pipeline.
+    """
     agent = session.exec(select(Agent).where(Agent.agent_id == agent_id)).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found.")
     if agent.revoked_at:
         raise HTTPException(status_code=410, detail="Agent has been revoked.")
 
-    return Response(content=agent.charter_vc, media_type="application/json")
+    if format == "ldp_vc":
+        return Response(content=agent.charter_vc, media_type="application/json")
+
+    # Extract charter claims from the stored ldp_vc for re-issuance
+    stored_vc = agent.get_charter_vc()
+    charter = {
+        k: v
+        for k, v in stored_vc.get("credentialSubject", {}).items()
+        if k != "id"
+    }
+    verification_method = f"{_registry_did}#key-1"
+
+    if format == "jwt_vc":
+        from app.jwt_vc import issue_vc_jwt
+        jwt_str = issue_vc_jwt(
+            agent_did=agent.did,
+            charter=charter,
+            issuer_did=_registry_did,
+            private_key=_registry_private_key,
+            verification_method=verification_method,
+            agent_public_key_jwk=agent.get_public_key_jwk(),
+        )
+        return Response(content=jwt_str, media_type="application/vc+jwt")
+
+    # format == "sd_jwt_vc"
+    from app.jwt_vc import issue_sd_jwt_vc
+    sd_jwt_str = issue_sd_jwt_vc(
+        agent_did=agent.did,
+        charter=charter,
+        issuer_did=_registry_did,
+        private_key=_registry_private_key,
+        verification_method=verification_method,
+        agent_public_key_jwk=agent.get_public_key_jwk(),
+    )
+    return Response(content=sd_jwt_str, media_type="application/vc+sd-jwt")
 
 
 # ── Key rotation ──────────────────────────────────────────────────────────────

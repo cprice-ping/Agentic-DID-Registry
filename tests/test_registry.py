@@ -431,3 +431,190 @@ class TestVerifiablePresentation:
         tampered = {**vp, "holder": "did:web:evil.example.com:agents:fake"}
         assert not verify_document_proof(tampered, agent_pub_jwk)
 
+
+# ── JWT format tests ──────────────────────────────────────────────────────────
+
+class TestJWTFormats:
+    """
+    Tests for vc+jwt and vc+sd-jwt charter formats and JWT VP / KB-JWT presentation.
+    """
+
+    @pytest.fixture(autouse=True, scope="class")
+    def register(self, client):  # noqa: PT004 (class-scope instance method, pytest <10)
+        from app.crypto import generate_ed25519_keypair
+        _, pub_jwk = generate_ed25519_keypair()
+        resp = client.post("/agents", json={
+            "agent_id": "jwttest",
+            "public_key_jwk": pub_jwk,
+            "charter": {
+                "name": "napa-node-01",
+                "capabilities": ["observe", "publish"],
+                "scope": "Napa Valley environmental monitoring",
+                "intent": "Collect domain sensor data",
+                "operator": "did:web:test.example.com",
+            },
+        })
+        assert resp.status_code == 201
+
+    # ── /charter?format=jwt_vc ───────────────────────────────────────────────
+
+    def test_jwt_vc_returns_compact_jwt(self, client):
+        resp = client.get("/agents/jwttest/charter?format=jwt_vc")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/vc+jwt")
+        parts = resp.text.split(".")
+        assert len(parts) == 3, "JWT must be header.payload.signature"
+
+    def test_jwt_vc_header_alg_is_eddsa(self, client):
+        import base64
+        resp = client.get("/agents/jwttest/charter?format=jwt_vc")
+        header_b64 = resp.text.split(".")[0]
+        pad = 4 - len(header_b64) % 4
+        header = json.loads(base64.urlsafe_b64decode(header_b64 + ("=" * pad if pad != 4 else "")))
+        assert header["alg"] == "EdDSA"
+        assert header["typ"] == "vc+jwt"
+
+    def test_jwt_vc_payload_claims(self, client):
+        import base64
+        resp = client.get("/agents/jwttest/charter?format=jwt_vc")
+        payload_b64 = resp.text.split(".")[1]
+        pad = 4 - len(payload_b64) % 4
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64 + ("=" * pad if pad != 4 else "")))
+        assert payload["iss"] == "did:web:test.example.com"
+        assert payload["sub"] == "did:web:test.example.com:agents:jwttest"
+        assert "vc" in payload
+        assert "AgentCharterCredential" in payload["vc"]["type"]
+        assert "cnf" in payload  # agent public key bound to credential
+        assert payload["cnf"]["jwk"]["kty"] == "OKP"
+
+    def test_jwt_vc_signature_verifies(self, client):
+        """Ed25519 signature on the VC-JWT must verify against the registry key."""
+        import base64
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+        jwt_str = client.get("/agents/jwttest/charter?format=jwt_vc").text
+        header_b64, payload_b64, sig_b64 = jwt_str.split(".")
+
+        def _dec(s):
+            pad = 4 - len(s) % 4
+            return base64.urlsafe_b64decode(s + ("=" * pad if pad != 4 else ""))
+
+        registry_doc = client.get("/.well-known/did.json").json()
+        pub_x = registry_doc["verificationMethod"][0]["publicKeyJwk"]["x"]
+        pub_key = Ed25519PublicKey.from_public_bytes(_dec(pub_x))
+        pub_key.verify(_dec(sig_b64), f"{header_b64}.{payload_b64}".encode())
+        # raises cryptography.exceptions.InvalidSignature on failure
+
+    # ── /charter?format=sd_jwt_vc ────────────────────────────────────────────
+
+    def test_sd_jwt_vc_returns_tilde_separated(self, client):
+        resp = client.get("/agents/jwttest/charter?format=sd_jwt_vc")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/vc+sd-jwt")
+        assert "~" in resp.text, "SD-JWT must contain ~ separators"
+
+    def test_sd_jwt_vc_has_disclosures(self, client):
+        resp = client.get("/agents/jwttest/charter?format=sd_jwt_vc")
+        parts = resp.text.split("~")
+        # parts[0] = JWT, parts[1:-1] = disclosures, parts[-1] = "" (trailing ~)
+        disclosures = [p for p in parts[1:] if p]
+        assert len(disclosures) > 0, "SD-JWT must have at least one disclosure"
+
+    def test_sd_jwt_vc_jwt_header(self, client):
+        import base64
+        resp = client.get("/agents/jwttest/charter?format=sd_jwt_vc")
+        jwt_part = resp.text.split("~")[0]
+        header_b64 = jwt_part.split(".")[0]
+        pad = 4 - len(header_b64) % 4
+        header = json.loads(base64.urlsafe_b64decode(header_b64 + ("=" * pad if pad != 4 else "")))
+        assert header["alg"] == "EdDSA"
+        assert header["typ"] == "vc+sd-jwt"
+
+    def test_sd_jwt_vc_payload_has_sd_digests(self, client):
+        import base64
+        resp = client.get("/agents/jwttest/charter?format=sd_jwt_vc")
+        jwt_part = resp.text.split("~")[0]
+        payload_b64 = jwt_part.split(".")[1]
+        pad = 4 - len(payload_b64) % 4
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64 + ("=" * pad if pad != 4 else "")))
+        assert "_sd" in payload
+        assert len(payload["_sd"]) > 0
+        assert payload["_sd_alg"] == "sha-256"
+        assert "vct" in payload
+        assert payload["sub"] == "did:web:test.example.com:agents:jwttest"
+
+    def test_sd_jwt_vc_disclosure_decodes_to_claim(self, client):
+        """Each disclosure must decode to [salt, claim_name, claim_value]."""
+        import base64, hashlib
+        resp = client.get("/agents/jwttest/charter?format=sd_jwt_vc")
+        parts = resp.text.split("~")
+        jwt_part = parts[0]
+        disclosures = [p for p in parts[1:] if p]
+
+        payload_b64 = jwt_part.split(".")[1]
+        pad = 4 - len(payload_b64) % 4
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64 + ("=" * pad if pad != 4 else "")))
+        sd_digests = set(payload["_sd"])
+
+        for disc_b64 in disclosures:
+            pad = 4 - len(disc_b64) % 4
+            decoded = json.loads(base64.urlsafe_b64decode(disc_b64 + ("=" * pad if pad != 4 else "")))
+            assert len(decoded) == 3, "Disclosure must be [salt, name, value]"
+            # Verify the digest is in the JWT payload
+            digest = base64.urlsafe_b64encode(
+                hashlib.sha256(disc_b64.encode()).digest()
+            ).rstrip(b"=").decode()
+            assert digest in sd_digests, f"Disclosure digest {digest!r} not found in _sd"
+
+    # ── JWT VP (present_jwt) ──────────────────────────────────────────────────
+
+    def test_make_jwt_vp_structure(self):
+        """make_jwt_vp produces a valid three-part JWT with expected claims."""
+        import base64
+        from app.crypto import generate_ed25519_keypair
+        from app.jwt_vc import issue_vc_jwt, make_jwt_vp
+
+        priv, pub_jwk = generate_ed25519_keypair()
+        agent_did = "did:web:test.example.com:agents:jwttest"
+        issuer_did = "did:web:test.example.com"
+        vc_jwt = issue_vc_jwt(agent_did, {"name": "t"}, issuer_did, priv, f"{issuer_did}#key-1")
+        vp_jwt = make_jwt_vp(agent_did, vc_jwt, priv, f"{agent_did}#key-1", "https://verifier.example", "nonce-abc")
+
+        parts = vp_jwt.split(".")
+        assert len(parts) == 3
+        payload_b64 = parts[1]
+        pad = 4 - len(payload_b64) % 4
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64 + ("=" * pad if pad != 4 else "")))
+        assert payload["iss"] == agent_did
+        assert payload["aud"] == "https://verifier.example"
+        assert payload["nonce"] == "nonce-abc"
+        assert "vp" in payload
+        assert vc_jwt in payload["vp"]["verifiableCredential"]
+
+    # ── KB-JWT (present_sd_jwt) ───────────────────────────────────────────────
+
+    def test_attach_key_binding_appends_kb_jwt(self):
+        """attach_key_binding must append a kb+jwt after the last ~."""
+        import base64
+        from app.crypto import generate_ed25519_keypair
+        from app.jwt_vc import issue_sd_jwt_vc, attach_key_binding
+
+        priv, pub_jwk = generate_ed25519_keypair()
+        agent_did = "did:web:test.example.com:agents:jwttest"
+        issuer_did = "did:web:test.example.com"
+        sd_jwt = issue_sd_jwt_vc(
+            agent_did, {"name": "t", "capabilities": ["observe"]},
+            issuer_did, priv, f"{issuer_did}#key-1", pub_jwk,
+        )
+        presentation = attach_key_binding(
+            sd_jwt, priv, f"{agent_did}#key-1", "https://verifier.example", "nonce-xyz"
+        )
+        parts = presentation.split("~")
+        kb_jwt = parts[-1]
+        assert kb_jwt, "KB-JWT must be non-empty"
+        header_b64 = kb_jwt.split(".")[0]
+        pad = 4 - len(header_b64) % 4
+        header = json.loads(base64.urlsafe_b64decode(header_b64 + ("=" * pad if pad != 4 else "")))
+        assert header["typ"] == "kb+jwt"
+        assert header["alg"] == "EdDSA"
+

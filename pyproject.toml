@@ -26,3 +26,8 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::pytest.PytestRemovedIn10Warning",
+]

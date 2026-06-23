@@ -362,6 +362,116 @@ class RegistryClient:
         )
         return {**vp, "proof": proof}
 
+    def present_jwt(
+        self,
+        did: str,
+        audience: str,
+        nonce: str,
+    ) -> str:
+        """
+        Create an OID4VP-compatible JWT Verifiable Presentation (jwt+vp).
+
+        Fetches the vc+jwt from the registry, wraps it in a VP JWT signed
+        by the agent's own key.
+
+        Parameters
+        ----------
+        did:      The agent DID presenting the credential.
+        audience: Verifier's ``client_id`` or ``redirect_uri`` (JWT ``aud``).
+        nonce:    Challenge from the verifier's presentation request.
+
+        Returns
+        -------
+        Compact JWT string (header.payload.signature).
+        """
+        from app.jwt_vc import make_jwt_vp
+
+        key_path = self._key_path(did)
+        if not key_path.exists():
+            raise FileNotFoundError(
+                f"No private key for {did!r}. Run registry.provision() first."
+            )
+        private_key = _load_private_key(key_path)
+
+        agent_id = self._did_to_agent_id(did)
+        if not agent_id:
+            raise ValueError(f"Cannot derive agent_id from DID: {did!r}")
+
+        with httpx.Client(timeout=self._http_timeout) as client:
+            resp = client.get(
+                f"{self._registry_url}/agents/{agent_id}/charter",
+                params={"format": "jwt_vc"},
+            )
+            resp.raise_for_status()
+        vc_jwt = resp.text
+
+        return make_jwt_vp(
+            holder_did=did,
+            vc_jwt=vc_jwt,
+            holder_private_key=private_key,
+            verification_method=f"{did}#key-1",
+            audience=audience,
+            nonce=nonce,
+        )
+
+    def present_sd_jwt(
+        self,
+        did: str,
+        audience: str,
+        nonce: str,
+        disclose: Optional[list[str]] = None,
+    ) -> str:
+        """
+        Create an SD-JWT-VC presentation with a Key Binding JWT (kb+jwt).
+
+        Fetches the vc+sd-jwt from the registry, optionally strips disclosures
+        the holder does not wish to reveal, then appends a KB-JWT binding the
+        nonce and audience — ready to send as ``vp_token`` in an OID4VP response.
+
+        Parameters
+        ----------
+        did:      The agent DID presenting the credential.
+        audience: Verifier's ``client_id`` or ``redirect_uri``.
+        nonce:    Challenge from the verifier's presentation request.
+        disclose: Claim names to include.  ``None`` = include all disclosures.
+
+        Returns
+        -------
+        SD-JWT-VC presentation string:  <JWT>~<Disc>...~<KB-JWT>
+        """
+        from app.jwt_vc import attach_key_binding
+
+        key_path = self._key_path(did)
+        if not key_path.exists():
+            raise FileNotFoundError(
+                f"No private key for {did!r}. Run registry.provision() first."
+            )
+        private_key = _load_private_key(key_path)
+
+        agent_id = self._did_to_agent_id(did)
+        if not agent_id:
+            raise ValueError(f"Cannot derive agent_id from DID: {did!r}")
+
+        with httpx.Client(timeout=self._http_timeout) as client:
+            resp = client.get(
+                f"{self._registry_url}/agents/{agent_id}/charter",
+                params={"format": "sd_jwt_vc"},
+            )
+            resp.raise_for_status()
+        sd_jwt_full = resp.text  # <JWT>~<Disc1>~...~  (no KB-JWT yet)
+
+        # Optional selective disclosure — strip claims the holder won't reveal
+        if disclose is not None:
+            sd_jwt_full = _filter_disclosures(sd_jwt_full, disclose)
+
+        return attach_key_binding(
+            sd_jwt_with_disclosures=sd_jwt_full,
+            holder_private_key=private_key,
+            verification_method=f"{did}#key-1",
+            audience=audience,
+            nonce=nonce,
+        )
+
     def invalidate_cache(self, did: Optional[str] = None) -> None:
         """Invalidate the verify cache for *did*, or clear it entirely."""
         if did:
@@ -581,6 +691,35 @@ def _extract_vm_key(did_doc: dict, vm_id: str) -> Optional[dict]:
         if not vm_id or vm.get("id") == vm_id:
             return vm.get("publicKeyJwk")
     return None
+
+
+def _filter_disclosures(sd_jwt: str, disclose: list[str]) -> str:
+    """
+    Strip disclosures from an SD-JWT whose claim name is not in *disclose*.
+
+    sd_jwt format: <JWT>~<Disc1>~<Disc2>~...~   (no KB-JWT)
+    Each disclosure is base64url(JSON([salt, name, value])).
+    """
+    parts = sd_jwt.split("~")
+    jwt_part = parts[0]
+    raw_discs = [p for p in parts[1:] if p]  # drop empty trailing element
+
+    kept = []
+    for disc_b64 in raw_discs:
+        try:
+            pad = 4 - len(disc_b64) % 4
+            if pad != 4:
+                disc_b64_padded = disc_b64 + "=" * pad
+            else:
+                disc_b64_padded = disc_b64
+            payload = json.loads(base64.urlsafe_b64decode(disc_b64_padded))
+            claim_name = payload[1]
+            if claim_name in disclose:
+                kept.append(disc_b64)
+        except Exception:
+            kept.append(disc_b64)  # keep if unparseable
+
+    return "~".join([jwt_part] + kept) + "~"
 
 
 # ── Module-level convenience instance ────────────────────────────────────────
