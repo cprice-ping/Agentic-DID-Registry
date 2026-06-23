@@ -333,3 +333,101 @@ class TestDIDHelpers:
         from app.did import did_to_url
         url = did_to_url("did:web:example.com:agents:node01")
         assert url == "https://example.com/agents/node01/did.json"
+
+
+# ── Verifiable Presentation tests ─────────────────────────────────────────────
+
+class TestVerifiablePresentation:
+    """
+    Tests for present() — structure and cryptographic correctness.
+
+    Sets up an agent directly through the registry API and saves the key/VC
+    where the RegistryClient expects them, without any HTTP transport trickery.
+    """
+
+    @pytest.fixture()
+    def agent_setup(self, client, tmp_path, sample_charter):
+        """Register an agent, manually persist key + VC, return (rc, did, pub_jwk, registry_did_doc)."""
+        import re
+        import uuid
+        from app.crypto import generate_ed25519_keypair, private_key_to_pem
+        from registry_client import RegistryClient
+
+        private_key, pub_jwk = generate_ed25519_keypair()
+        agent_id = f"vptest{uuid.uuid4().hex[:6]}"
+        resp = client.post("/agents", json={
+            "agent_id": agent_id,
+            "public_key_jwk": pub_jwk,
+            "charter": sample_charter,
+        })
+        assert resp.status_code == 201
+        data = resp.json()
+        did = data["did"]
+        charter_vc = data["charter_vc"]
+
+        rc = RegistryClient(
+            registry_url="http://testserver",
+            keys_dir=tmp_path / "keys",
+            charters_dir=tmp_path / "charters",
+        )
+
+        slug = re.sub(r"[^a-zA-Z0-9_\-]", "_", did)
+        key_path = tmp_path / "keys" / f"{slug}.pem"
+        charter_file = tmp_path / "charters" / f"{slug}.json"
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        charter_file.parent.mkdir(parents=True, exist_ok=True)
+        key_path.write_bytes(private_key_to_pem(private_key))
+        key_path.chmod(0o600)
+        charter_file.write_text(json.dumps(charter_vc, indent=2))
+
+        registry_did_doc = client.get("/.well-known/did.json").json()
+        return rc, did, pub_jwk, charter_vc, registry_did_doc
+
+    def test_present_returns_vp(self, agent_setup):
+        rc, did, *_ = agent_setup
+        vp = rc.present(did)
+        assert "VerifiablePresentation" in vp["type"]
+        assert vp["holder"] == did
+        assert len(vp["verifiableCredential"]) == 1
+        assert "proof" in vp
+
+    def test_present_proof_purpose_is_authentication(self, agent_setup):
+        rc, did, *_ = agent_setup
+        vp = rc.present(did)
+        assert vp["proof"]["proofPurpose"] == "authentication"
+        assert vp["proof"]["verificationMethod"] == f"{did}#key-1"
+
+    def test_present_includes_challenge(self, agent_setup):
+        rc, did, *_ = agent_setup
+        vp = rc.present(did, challenge="nonce-123")
+        assert vp.get("challenge") == "nonce-123"
+
+    def test_holder_signature_verifies(self, agent_setup):
+        """VP proof must verify against the agent's own public key."""
+        from app.crypto import verify_document_proof
+        rc, did, agent_pub_jwk, _, _ = agent_setup
+        vp = rc.present(did)
+        assert verify_document_proof(vp, agent_pub_jwk)
+
+    def test_charter_vc_inside_vp_verifies(self, agent_setup):
+        """Registry's signature on the VC embedded in the VP must be valid."""
+        from app.crypto import verify_document_proof
+        rc, did, _, _, registry_did_doc = agent_setup
+        vp = rc.present(did)
+        charter_vc = vp["verifiableCredential"][0]
+        vm_id = charter_vc["proof"]["verificationMethod"]
+        reg_pub_jwk = next(
+            vm["publicKeyJwk"]
+            for vm in registry_did_doc["verificationMethod"]
+            if vm["id"] == vm_id
+        )
+        assert verify_document_proof(charter_vc, reg_pub_jwk)
+
+    def test_tampered_vp_fails(self, agent_setup):
+        """Modifying the VP after signing must invalidate the holder's proof."""
+        from app.crypto import verify_document_proof
+        rc, did, agent_pub_jwk, _, _ = agent_setup
+        vp = rc.present(did)
+        tampered = {**vp, "holder": "did:web:evil.example.com:agents:fake"}
+        assert not verify_document_proof(tampered, agent_pub_jwk)
+

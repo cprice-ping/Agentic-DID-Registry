@@ -310,6 +310,58 @@ class RegistryClient:
         )
         return {**record, "proof": proof}
 
+    def present(self, did: str, challenge: Optional[str] = None) -> dict:
+        """
+        Create a Verifiable Presentation (VP) wrapping the agent's charter VC.
+
+        The VP is signed with the agent's own private key, proving that the
+        presenter controls the DID in the credential.  Any third party can verify
+        both signatures independently:
+
+        1. Agent signature on the VP  → proves the presenter controls the DID
+        2. Registry signature on the VC inside the VP → proves the charter was
+           issued by the trusted registry
+
+        Parameters
+        ----------
+        did:       The agent DID to present on behalf of.
+        challenge: Optional nonce from the verifier (replay protection).
+
+        Raises
+        ------
+        FileNotFoundError
+            If the private key or charter VC are not found locally.
+        """
+        key_path = self._key_path(did)
+        charter_path = self._charter_path(did)
+        if not key_path.exists():
+            raise FileNotFoundError(
+                f"No private key for {did!r}. Run registry.provision() first."
+            )
+        if not charter_path.exists():
+            raise FileNotFoundError(
+                f"No charter VC for {did!r}. Run registry.provision() first."
+            )
+
+        charter_vc = json.loads(charter_path.read_text())
+        vp: dict = {
+            "@context": ["https://www.w3.org/ns/credentials/v2"],
+            "type": ["VerifiablePresentation"],
+            "holder": did,
+            "verifiableCredential": [charter_vc],
+        }
+        if challenge:
+            vp["challenge"] = challenge
+
+        private_key = _load_private_key(key_path)
+        proof = _make_proof(
+            private_key,
+            vp,
+            verification_method=f"{did}#key-1",
+            proof_purpose="authentication",
+        )
+        return {**vp, "proof": proof}
+
     def invalidate_cache(self, did: Optional[str] = None) -> None:
         """Invalidate the verify cache for *did*, or clear it entirely."""
         if did:
@@ -371,6 +423,164 @@ class RegistryClient:
             if not vm_id or vm.get("id") == vm_id:
                 return vm.get("publicKeyJwk")
         return None
+
+
+# ── Standalone presentation verifier ─────────────────────────────────────────
+
+class PresentationVerificationResult:
+    """Result of verify_presentation()."""
+
+    def __init__(
+        self,
+        valid: bool,
+        holder_did: str,
+        charter: Optional[dict],
+        holder_signature_valid: bool,
+        charter_signature_valid: bool,
+        error: Optional[str] = None,
+    ) -> None:
+        self.valid = valid
+        self.holder_did = holder_did
+        self.charter = charter
+        self.holder_signature_valid = holder_signature_valid
+        self.charter_signature_valid = charter_signature_valid
+        self.error = error
+
+    def __repr__(self) -> str:
+        return (
+            f"PresentationVerificationResult("
+            f"valid={self.valid}, "
+            f"holder={self.holder_did!r}, "
+            f"holder_sig={self.holder_signature_valid}, "
+            f"charter_sig={self.charter_signature_valid}"
+            f"{',' + repr(self.error) if self.error else ''})"
+        )
+
+
+def verify_presentation(
+    vp: dict,
+    registry_url: str,
+    challenge: Optional[str] = None,
+    http_timeout: float = 10.0,
+) -> PresentationVerificationResult:
+    """
+    Verify a Verifiable Presentation end-to-end.
+
+    Two independent checks:
+    1. Holder signature on the VP — proves the presenter controls the DID
+    2. Registry signature on the charter VC inside the VP — proves the charter
+       was issued by the trusted registry
+
+    Optionally checks that the VP's challenge matches the expected value.
+
+    Parameters
+    ----------
+    vp:           The Verifiable Presentation dict (as returned by ``present()``).
+    registry_url: Base URL of the registry, used to fetch DID documents.
+    challenge:    If provided, must match ``vp["challenge"]`` exactly.
+
+    Returns
+    -------
+    PresentationVerificationResult with ``.valid`` True only if both
+    signatures check out (and the challenge matches if supplied).
+    """
+    holder_did: str = vp.get("holder", "")
+    holder_sig_ok = False
+    charter_sig_ok = False
+
+    def _fail(msg: str) -> PresentationVerificationResult:
+        return PresentationVerificationResult(
+            valid=False,
+            holder_did=holder_did,
+            charter=None,
+            holder_signature_valid=holder_sig_ok,
+            charter_signature_valid=charter_sig_ok,
+            error=msg,
+        )
+
+    # Optional challenge check
+    if challenge is not None and vp.get("challenge") != challenge:
+        return _fail(
+            f"Challenge mismatch: expected {challenge!r}, got {vp.get('challenge')!r}"
+        )
+
+    if not holder_did:
+        return _fail("VP missing 'holder' field.")
+
+    vcs = vp.get("verifiableCredential", [])
+    if not vcs:
+        return _fail("VP contains no verifiableCredential.")
+
+    # ── 1. Verify holder's signature on the VP ────────────────────────────────
+    # Fetch the agent's DID document from the registry to get its public key.
+    # In a did:web world this would be a direct HTTPS fetch to the resolution URL;
+    # we fetch from the registry API which serves the same document.
+    try:
+        parts = holder_did.split(":")
+        if len(parts) != 5 or parts[3] != "agents":
+            return _fail(f"Unsupported DID format for holder: {holder_did!r}")
+        agent_id = parts[4]
+        base = registry_url.rstrip("/")
+
+        with httpx.Client(timeout=http_timeout) as client:
+            agent_did_resp = client.get(f"{base}/agents/{agent_id}/did.json")
+            if agent_did_resp.status_code == 404:
+                return _fail(f"Agent DID not found in registry: {holder_did!r}")
+            agent_did_resp.raise_for_status()
+            agent_did_doc = agent_did_resp.json()
+
+            if agent_did_doc.get("deactivated"):
+                return _fail(f"Agent DID has been revoked: {holder_did!r}")
+
+            # Fetch registry DID document for charter VC verification
+            registry_did_resp = client.get(f"{base}/.well-known/did.json")
+            registry_did_resp.raise_for_status()
+            registry_did_doc = registry_did_resp.json()
+
+    except httpx.HTTPError as exc:
+        return _fail(f"HTTP error fetching DID documents: {exc}")
+
+    # Locate holder's public key
+    vp_proof_vm = vp.get("proof", {}).get("verificationMethod", "")
+    agent_pub_key_jwk = _extract_vm_key(agent_did_doc, vp_proof_vm)
+    if not agent_pub_key_jwk:
+        return _fail(
+            f"Could not find verification key {vp_proof_vm!r} in agent DID document."
+        )
+
+    holder_sig_ok = _verify_proof(vp, agent_pub_key_jwk)
+    if not holder_sig_ok:
+        return _fail("Holder signature on VP is invalid.")
+
+    # ── 2. Verify registry's signature on the charter VC ─────────────────────
+    charter_vc = vcs[0]
+    vc_proof_vm = charter_vc.get("proof", {}).get("verificationMethod", "")
+    registry_pub_key_jwk = _extract_vm_key(registry_did_doc, vc_proof_vm)
+    if not registry_pub_key_jwk:
+        return _fail(
+            f"Could not find verification key {vc_proof_vm!r} in registry DID document."
+        )
+
+    charter_sig_ok = _verify_proof(charter_vc, registry_pub_key_jwk)
+    if not charter_sig_ok:
+        return _fail("Registry signature on charter VC is invalid.")
+
+    charter = charter_vc.get("credentialSubject", {})
+    return PresentationVerificationResult(
+        valid=True,
+        holder_did=holder_did,
+        charter=charter,
+        holder_signature_valid=True,
+        charter_signature_valid=True,
+    )
+
+
+def _extract_vm_key(did_doc: dict, vm_id: str) -> Optional[dict]:
+    """Extract publicKeyJwk from a DID document by verification method id."""
+    for vm in did_doc.get("verificationMethod", []):
+        if not vm_id or vm.get("id") == vm_id:
+            return vm.get("publicKeyJwk")
+    return None
 
 
 # ── Module-level convenience instance ────────────────────────────────────────
