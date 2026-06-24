@@ -1,20 +1,25 @@
 # Agent Identity Registry
 
-An **issuer**. It mints `did:web` identities for autonomous agents and issues
-cryptographically signed charter Verifiable Credentials — without human signup
-flows. Private keys never leave the agent.
+**Agentic is an authorization problem.** The minimal thing a decision needs from
+an agent is a *stable, provable identifier it can derive context from* —
+self-rooted (the agent's own key) and vouched (a need-based attestation). This
+repo mints that identifier and binds its durable context (the charter), and does
+no more — the decision, and all fresh context, live with the consumer. Identity
+here is a **join key for a decision, not a passport.**
 
-That is the *whole* job. This repo issues; it does not consume. It makes no
+Concretely, that makes this an **issuer**: it mints `did:web` identifiers and
+issues signed charter Verifiable Credentials — no human signup flows, and private
+keys never leave the agent. It issues; it does not consume. It makes no
 authorization decisions, runs no policy engine, and drives no presentation
 protocol. Read **[Scope & boundary](#scope--boundary)** before adding anything —
 the pull to make it do more is structural, and the boundary is here to resist it.
 
-> **Why this exists** — and where it plugs into the 2026 agent-identity field
-> (OAP, AGNTCY, IETF transaction-tokens-for-agents, WIMSE, A2A): see
-> **[docs/thesis.md](docs/thesis.md)**. Short version: the neutral *origin* of
-> portable, self-owned agent identity that no consuming system owns — identity
-> acquired *on need*, not at birth. Agents get identity like servers, not like
-> captured humans.
+> **Why, and when this is even load-bearing** — the thesis, the Regime A/B
+> collapse line (when agent identity is needed at all vs. when a session
+> dissolves the need), and where this plugs into the 2026 field (OAP, AGNTCY,
+> IETF transaction-tokens-for-agents, WIMSE, A2A): see
+> **[docs/thesis.md](docs/thesis.md)**. Identity is acquired *on need*, not at
+> birth; the identifier stays empty and provable; context derives around it.
 
 ---
 
