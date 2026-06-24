@@ -1,4 +1,4 @@
-# Agent Identity Registry
+# Agent Identifier Registry
 
 **Agentic is an authorization problem.** The minimal thing a decision needs from
 an agent is a *stable, provable identifier it can derive context from* —
