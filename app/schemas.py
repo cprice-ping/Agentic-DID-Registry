@@ -29,6 +29,14 @@ class KeyRotationRequest(BaseModel):
     new_public_key_jwk: dict = Field(
         ..., description="Replacement Ed25519 public key as a JWK."
     )
+    proof: dict = Field(
+        ...,
+        description=(
+            "Data Integrity proof over {did, new_public_key_jwk}, signed with the "
+            "agent's CURRENT private key. Proves possession of the key being "
+            "rotated out — no operator voucher needed for self-rotation."
+        ),
+    )
 
 
 class KeyRotationResponse(BaseModel):

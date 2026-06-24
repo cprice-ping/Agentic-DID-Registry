@@ -5,10 +5,12 @@ WORKDIR /app
 COPY pyproject.toml .
 COPY app/ app/
 COPY registry_client.py .
+COPY operator_cli.py .
 
 RUN pip install --no-cache-dir -e .
 
-# /data is a mounted Azure File Share — persists registry.key.pem and registry.db
+# Mount persistent storage at /data for registry.key.pem, registry.db, and
+# operator_jwks.json — any host works (cloud volume, k8s PVC, bind mount).
 VOLUME ["/data"]
 
 EXPOSE 8000

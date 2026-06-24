@@ -2,34 +2,121 @@
 Integration tests for the Agent Identity Registry.
 
 Runs entirely in-process using FastAPI's TestClient — no real HTTP server needed.
-Uses a temporary SQLite database and a fresh registry keypair per test session.
+Uses a temporary SQLite database, a fresh registry keypair, and a fresh operator
+keypair (the enrollment trust root) per test session.
 """
+import base64
+import gzip
+import hashlib
 import json
 import os
-import tempfile
-from pathlib import Path
+import uuid
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import Session, SQLModel, create_engine
+
+# ── Operator (enrollment) trust root, shared across the session ──────────────
+
+_OPERATOR: dict = {}
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _b64url_json(obj: dict) -> str:
+    return _b64url(json.dumps(obj, separators=(",", ":")).encode())
+
+
+def make_voucher(
+    agent_id: str,
+    capabilities=None,
+    operator=None,
+    purpose: str = "enroll",
+    ttl: int = 3600,
+    aud=None,
+    jti=None,
+    sign_key=None,
+) -> str:
+    """Mint an operator-signed enrollment/revocation voucher for tests."""
+    key = sign_key or _OPERATOR["key"]
+    now = int(datetime.now(timezone.utc).timestamp())
+    payload: dict = {
+        "iss": "test-operator",
+        "aud": aud if aud is not None else _OPERATOR["registry_did"],
+        "sub": agent_id,
+        "iat": now,
+        "exp": now + ttl,
+        "jti": jti or str(uuid.uuid4()),
+        "purpose": purpose,
+    }
+    if purpose == "enroll":
+        if capabilities is not None:
+            payload["capabilities"] = capabilities
+        if operator is not None:
+            payload["operator"] = operator
+    header = {"alg": "EdDSA", "typ": "enrollment-voucher+jwt", "kid": _OPERATOR["kid"]}
+    h = _b64url_json(header)
+    p = _b64url_json(payload)
+    sig = _b64url(key.sign(f"{h}.{p}".encode()))
+    return f"{h}.{p}.{sig}"
+
+
+def register(client, agent_id, public_key_jwk, charter, capabilities="auto", **voucher_kw):
+    """POST /agents with an enrollment voucher whose grant covers the charter."""
+    caps = charter.get("capabilities") if capabilities == "auto" else capabilities
+    voucher = make_voucher(agent_id, capabilities=caps, **voucher_kw)
+    return client.post(
+        "/agents",
+        json={"agent_id": agent_id, "public_key_jwk": public_key_jwk, "charter": charter},
+        headers={"Authorization": f"Bearer {voucher}"},
+    )
+
+
+def _decode_status_bit(encoded_list: str, index: int) -> int:
+    """Decode a multibase('u')+gzip Bitstring Status List and read bit *index*."""
+    assert encoded_list.startswith("u")
+    raw = encoded_list[1:]
+    pad = 4 - len(raw) % 4
+    if pad != 4:
+        raw += "=" * pad
+    bits = gzip.decompress(base64.urlsafe_b64decode(raw))
+    return (bits[index // 8] >> (7 - (index % 8))) & 1
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session", autouse=True)
 def configure_test_env(tmp_path_factory):
-    """Point the app at a temporary DB and key file for the whole test session."""
+    """Point the app at a temporary DB, key file, and operator JWKS."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
     tmp = tmp_path_factory.mktemp("registry")
     os.environ["REGISTRY_DOMAIN"] = "test.example.com"
     os.environ["REGISTRY_KEY_PATH"] = str(tmp / "registry.key.pem")
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp / 'registry.db'}"
+
+    # Operator trust root — registry trusts this public key for enrollment.
+    op_key = Ed25519PrivateKey.generate()
+    raw = op_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    kid = _b64url(hashlib.sha256(raw).digest())[:16]
+    jwks_path = tmp / "operator_jwks.json"
+    jwks_path.write_text(
+        json.dumps({"keys": [{"kty": "OKP", "crv": "Ed25519", "x": _b64url(raw), "kid": kid}]})
+    )
+    os.environ["OPERATOR_JWKS_PATH"] = str(jwks_path)
+
+    _OPERATOR["key"] = op_key
+    _OPERATOR["kid"] = kid
+    _OPERATOR["registry_did"] = "did:web:test.example.com"
     yield
-    # Cleanup handled automatically by tmp_path_factory
 
 
 @pytest.fixture(scope="session")
 def client(configure_test_env):
     """Create a TestClient for the full FastAPI app."""
-    # Import after env vars are set
     from app.main import app
     with TestClient(app) as c:
         yield c
@@ -86,30 +173,18 @@ class TestRegistryDIDDocument:
 class TestAgentRegistration:
     def test_register_returns_201(self, client, sample_charter, agent_keypair):
         pub_jwk, _ = agent_keypair
-        resp = client.post("/agents", json={
-            "agent_id": "napanode01",
-            "public_key_jwk": pub_jwk,
-            "charter": sample_charter,
-        })
+        resp = register(client, "napanode01", pub_jwk, sample_charter)
         assert resp.status_code == 201
 
     def test_register_returns_did(self, client, sample_charter, agent_keypair):
         pub_jwk, _ = agent_keypair
-        resp = client.post("/agents", json={
-            "agent_id": "napanode02",
-            "public_key_jwk": pub_jwk,
-            "charter": sample_charter,
-        })
+        resp = register(client, "napanode02", pub_jwk, sample_charter)
         data = resp.json()
         assert data["did"] == "did:web:test.example.com:agents:napanode02"
 
     def test_register_returns_charter_vc(self, client, sample_charter, agent_keypair):
         pub_jwk, _ = agent_keypair
-        resp = client.post("/agents", json={
-            "agent_id": "napanode03",
-            "public_key_jwk": pub_jwk,
-            "charter": sample_charter,
-        })
+        resp = register(client, "napanode03", pub_jwk, sample_charter)
         data = resp.json()
         vc = data["charter_vc"]
         assert "VerifiableCredential" in vc["type"]
@@ -120,28 +195,108 @@ class TestAgentRegistration:
         assert subject["capabilities"] == ["observe", "publish"]
         assert "proof" in vc
 
+    def test_charter_has_validity_and_status(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        vc = register(client, "napaexpiry", pub_jwk, sample_charter).json()["charter_vc"]
+        assert "validFrom" in vc and "validUntil" in vc
+        status = vc["credentialStatus"]
+        assert status["type"] == "BitstringStatusListEntry"
+        assert status["statusListCredential"].endswith("/status/list")
+
     def test_duplicate_agent_id_returns_409(self, client, sample_charter, agent_keypair):
         pub_jwk, _ = agent_keypair
-        client.post("/agents", json={
-            "agent_id": "duptest",
-            "public_key_jwk": pub_jwk,
-            "charter": sample_charter,
-        })
-        resp = client.post("/agents", json={
-            "agent_id": "duptest",
-            "public_key_jwk": pub_jwk,
-            "charter": sample_charter,
-        })
+        register(client, "duptest", pub_jwk, sample_charter)
+        resp = register(client, "duptest", pub_jwk, sample_charter)
         assert resp.status_code == 409
 
     def test_invalid_agent_id_rejected(self, client, sample_charter, agent_keypair):
         pub_jwk, _ = agent_keypair
-        resp = client.post("/agents", json={
-            "agent_id": "UPPERCASE-INVALID!",
-            "public_key_jwk": pub_jwk,
-            "charter": sample_charter,
-        })
+        resp = client.post(
+            "/agents",
+            json={
+                "agent_id": "UPPERCASE-INVALID!",
+                "public_key_jwk": pub_jwk,
+                "charter": sample_charter,
+            },
+            headers={"Authorization": f"Bearer {make_voucher('UPPERCASE-INVALID!')}"},
+        )
         assert resp.status_code == 422
+
+
+# ── Enrollment voucher auth ───────────────────────────────────────────────────
+
+class TestEnrollmentVoucher:
+    def test_missing_voucher_rejected(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        resp = client.post(
+            "/agents",
+            json={"agent_id": "novoucher", "public_key_jwk": pub_jwk, "charter": sample_charter},
+        )
+        assert resp.status_code == 401
+
+    def test_tampered_voucher_rejected(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        voucher = make_voucher("tampered", capabilities=["observe", "publish"])
+        h, p, s = voucher.split(".")
+        bad = f"{h}.{p}.{s[:-4]}AAAA"  # corrupt signature
+        resp = client.post(
+            "/agents",
+            json={"agent_id": "tampered", "public_key_jwk": pub_jwk, "charter": sample_charter},
+            headers={"Authorization": f"Bearer {bad}"},
+        )
+        assert resp.status_code == 403
+
+    def test_wrong_audience_rejected(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        resp = register(
+            client, "wrongaud", pub_jwk, sample_charter, aud="did:web:other.example.com"
+        )
+        assert resp.status_code == 403
+
+    def test_untrusted_operator_rejected(self, client, sample_charter, agent_keypair):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        pub_jwk, _ = agent_keypair
+        rogue = Ed25519PrivateKey.generate()
+        resp = register(client, "rogueop", pub_jwk, sample_charter, sign_key=rogue)
+        assert resp.status_code == 403
+
+    def test_agent_id_mismatch_rejected(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        voucher = make_voucher("authorized-id", capabilities=["observe", "publish"])
+        resp = client.post(
+            "/agents",
+            json={"agent_id": "different-id", "public_key_jwk": pub_jwk, "charter": sample_charter},
+            headers={"Authorization": f"Bearer {voucher}"},
+        )
+        assert resp.status_code == 403
+
+    def test_capability_outside_grant_rejected(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        # Voucher grants only "observe"; charter asks for observe+publish.
+        resp = register(client, "overclaim", pub_jwk, sample_charter, capabilities=["observe"])
+        assert resp.status_code == 403
+
+    def test_voucher_clamps_operator(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        charter = {**sample_charter, "operator": "did:web:agent-asserted.example.com"}
+        resp = register(
+            client, "clampop", pub_jwk, charter,
+            operator="did:web:trusted-operator.example.com",
+        )
+        assert resp.status_code == 201
+        subject = resp.json()["charter_vc"]["credentialSubject"]
+        assert subject["operator"] == "did:web:trusted-operator.example.com"
+
+    def test_voucher_single_use(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        voucher = make_voucher("singleuse", capabilities=["observe", "publish"])
+        body = {"agent_id": "singleuse", "public_key_jwk": pub_jwk, "charter": sample_charter}
+        headers = {"Authorization": f"Bearer {voucher}"}
+        first = client.post("/agents", json=body, headers=headers)
+        assert first.status_code == 201
+        second = client.post("/agents", json=body, headers=headers)
+        assert second.status_code == 409
+        assert "already been used" in second.json()["detail"]
 
 
 # ── DID document resolution ───────────────────────────────────────────────────
@@ -150,11 +305,7 @@ class TestAgentDIDDocument:
     @pytest.fixture(autouse=True)
     def register(self, client, sample_charter, agent_keypair):
         pub_jwk, _ = agent_keypair
-        client.post("/agents", json={
-            "agent_id": "diddoctest",
-            "public_key_jwk": pub_jwk,
-            "charter": sample_charter,
-        })
+        register(client, "diddoctest", pub_jwk, sample_charter)
 
     def test_did_document_returns_200(self, client):
         resp = client.get("/agents/diddoctest/did.json")
@@ -184,11 +335,7 @@ class TestCharterRetrieval:
     @pytest.fixture(autouse=True)
     def register(self, client, sample_charter, agent_keypair):
         pub_jwk, _ = agent_keypair
-        client.post("/agents", json={
-            "agent_id": "chartertest",
-            "public_key_jwk": pub_jwk,
-            "charter": sample_charter,
-        })
+        register(client, "chartertest", pub_jwk, sample_charter)
 
     def test_charter_returns_200(self, client):
         resp = client.get("/agents/chartertest/charter")
@@ -218,37 +365,96 @@ class TestCharterRetrieval:
         assert client.get("/agents/nobody/charter").status_code == 404
 
 
+# ── Bitstring Status List ─────────────────────────────────────────────────────
+
+class TestStatusList:
+    def test_status_list_is_signed_credential(self, client):
+        from app.crypto import verify_document_proof
+        vc = client.get("/status/list").json()
+        assert "BitstringStatusListCredential" in vc["type"]
+        assert vc["credentialSubject"]["encodedList"].startswith("u")
+        registry_doc = client.get("/.well-known/did.json").json()
+        pub = registry_doc["verificationMethod"][0]["publicKeyJwk"]
+        assert verify_document_proof(vc, pub)
+
+    def test_revocation_flips_status_bit(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        vc = register(client, "statusrevoke", pub_jwk, sample_charter).json()["charter_vc"]
+        index = int(vc["credentialStatus"]["statusListIndex"])
+
+        before = client.get("/status/list").json()["credentialSubject"]["encodedList"]
+        assert _decode_status_bit(before, index) == 0
+
+        voucher = make_voucher("statusrevoke", purpose="revoke")
+        client.delete("/agents/statusrevoke", headers={"Authorization": f"Bearer {voucher}"})
+
+        after = client.get("/status/list").json()["credentialSubject"]["encodedList"]
+        assert _decode_status_bit(after, index) == 1
+
+
 # ── Key rotation ──────────────────────────────────────────────────────────────
 
 class TestKeyRotation:
-    @pytest.fixture(autouse=True)
-    def register(self, client, sample_charter):
+    @pytest.fixture()
+    def agent(self, client, sample_charter):
+        """Register a fresh, isolated agent and return (agent_id, did, current_key)."""
         from app.crypto import generate_ed25519_keypair
-        self.orig_key, orig_jwk = generate_ed25519_keypair()
-        client.post("/agents", json={
-            "agent_id": "rotatetest",
-            "public_key_jwk": orig_jwk,
-            "charter": sample_charter,
-        })
+        key, jwk = generate_ed25519_keypair()
+        agent_id = f"rotate{uuid.uuid4().hex[:8]}"
+        resp = register(client, agent_id, jwk, sample_charter)
+        assert resp.status_code == 201
+        return agent_id, resp.json()["did"], key
 
-    def test_rotate_returns_200(self, client):
+    @staticmethod
+    def _rotation_body(did, new_jwk, sign_key):
+        from app.crypto import sign_document
+        signed = sign_document(
+            {"did": did, "new_public_key_jwk": new_jwk},
+            sign_key,
+            f"{did}#key-1",
+            proof_purpose="authentication",
+        )
+        return {"new_public_key_jwk": new_jwk, "proof": signed["proof"]}
+
+    def test_rotate_returns_200(self, client, agent):
         from app.crypto import generate_ed25519_keypair
+        agent_id, did, key = agent
         _, new_jwk = generate_ed25519_keypair()
-        resp = client.post("/agents/rotatetest/rotate", json={"new_public_key_jwk": new_jwk})
+        resp = client.post(f"/agents/{agent_id}/rotate", json=self._rotation_body(did, new_jwk, key))
         assert resp.status_code == 200
 
-    def test_rotate_updates_did_document_key(self, client):
+    def test_rotate_without_valid_proof_rejected(self, client, agent):
         from app.crypto import generate_ed25519_keypair
+        agent_id, did, _ = agent
+        wrong_key, _ = generate_ed25519_keypair()  # not the current key
         _, new_jwk = generate_ed25519_keypair()
-        client.post("/agents/rotatetest/rotate", json={"new_public_key_jwk": new_jwk})
-        doc = client.get("/agents/rotatetest/did.json").json()
+        resp = client.post(
+            f"/agents/{agent_id}/rotate",
+            json=self._rotation_body(did, new_jwk, wrong_key),
+        )
+        assert resp.status_code == 403
+
+    def test_rotate_missing_proof_is_422(self, client, agent):
+        from app.crypto import generate_ed25519_keypair
+        agent_id, _, _ = agent
+        _, new_jwk = generate_ed25519_keypair()
+        resp = client.post(f"/agents/{agent_id}/rotate", json={"new_public_key_jwk": new_jwk})
+        assert resp.status_code == 422
+
+    def test_rotate_updates_did_document_key(self, client, agent):
+        from app.crypto import generate_ed25519_keypair
+        agent_id, did, key = agent
+        _, new_jwk = generate_ed25519_keypair()
+        client.post(f"/agents/{agent_id}/rotate", json=self._rotation_body(did, new_jwk, key))
+        doc = client.get(f"/agents/{agent_id}/did.json").json()
         assert doc["verificationMethod"][0]["publicKeyJwk"]["x"] == new_jwk["x"]
 
-    def test_rotate_reissues_charter_vc(self, client):
+    def test_rotate_reissues_charter_vc(self, client, agent):
         from app.crypto import generate_ed25519_keypair, verify_document_proof
+        agent_id, did, key = agent
         _, new_jwk = generate_ed25519_keypair()
         data = client.post(
-            "/agents/rotatetest/rotate", json={"new_public_key_jwk": new_jwk}
+            f"/agents/{agent_id}/rotate", json=self._rotation_body(did, new_jwk, key)
         ).json()
         registry_doc = client.get("/.well-known/did.json").json()
         vm_id = data["charter_vc"]["proof"]["verificationMethod"]
@@ -266,29 +472,40 @@ class TestRevocation:
     @pytest.fixture(autouse=True)
     def register(self, client, sample_charter, agent_keypair):
         pub_jwk, _ = agent_keypair
-        client.post("/agents", json={
-            "agent_id": "revoketest",
-            "public_key_jwk": pub_jwk,
-            "charter": sample_charter,
-        })
+        register(client, "revoketest", pub_jwk, sample_charter)
+
+    def _revoke(self, client, agent_id="revoketest", **kw):
+        voucher = make_voucher(agent_id, purpose="revoke", **kw)
+        return client.delete(
+            f"/agents/{agent_id}", headers={"Authorization": f"Bearer {voucher}"}
+        )
+
+    def test_revoke_without_voucher_rejected(self, client):
+        assert client.delete("/agents/revoketest").status_code == 401
+
+    def test_revoke_with_enroll_voucher_rejected(self, client):
+        voucher = make_voucher("revoketest", purpose="enroll", capabilities=["observe"])
+        resp = client.delete(
+            "/agents/revoketest", headers={"Authorization": f"Bearer {voucher}"}
+        )
+        assert resp.status_code == 403
 
     def test_revoke_returns_200(self, client):
-        resp = client.delete("/agents/revoketest")
-        assert resp.status_code == 200
+        assert self._revoke(client).status_code == 200
 
     def test_revoked_did_document_is_tombstone(self, client):
-        client.delete("/agents/revoketest")
+        self._revoke(client)
         doc = client.get("/agents/revoketest/did.json").json()
         assert doc.get("deactivated") is True
 
     def test_revoked_charter_returns_410(self, client):
-        client.delete("/agents/revoketest")
+        self._revoke(client)
         resp = client.get("/agents/revoketest/charter")
         assert resp.status_code == 410
 
     def test_double_revoke_returns_410(self, client):
-        client.delete("/agents/revoketest")
-        resp = client.delete("/agents/revoketest")
+        self._revoke(client)
+        resp = self._revoke(client)
         assert resp.status_code == 410
 
 
@@ -316,6 +533,36 @@ class TestCrypto:
         _, other_pub_jwk = generate_ed25519_keypair()
         signed = sign_document({"hello": "world"}, private_key, "did:web:test#key-1")
         assert not verify_document_proof(signed, other_pub_jwk)
+
+
+# ── Voucher unit tests ────────────────────────────────────────────────────────
+
+class TestVoucherModule:
+    def _keys(self):
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+        raw = _OPERATOR["key"].public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        return {_OPERATOR["kid"]: {"kty": "OKP", "crv": "Ed25519", "x": _b64url(raw), "kid": _OPERATOR["kid"]}}
+
+    def test_valid_voucher_grant(self):
+        from app.voucher import verify_voucher
+        v = make_voucher("unit01", capabilities=["observe"], operator="did:web:op")
+        grant = verify_voucher(v, self._keys(), expected_audience=_OPERATOR["registry_did"])
+        assert grant.agent_id == "unit01"
+        assert grant.capabilities == ["observe"]
+        assert grant.operator == "did:web:op"
+        assert grant.purpose == "enroll"
+
+    def test_no_trusted_keys_rejects(self):
+        from app.voucher import verify_voucher, VoucherError
+        v = make_voucher("unit02")
+        with pytest.raises(VoucherError):
+            verify_voucher(v, {}, expected_audience=_OPERATOR["registry_did"])
+
+    def test_expired_voucher_rejected(self):
+        from app.voucher import verify_voucher, VoucherError
+        v = make_voucher("unit03", ttl=-10)
+        with pytest.raises(VoucherError):
+            verify_voucher(v, self._keys(), expected_audience=_OPERATOR["registry_did"])
 
 
 # ── DID helpers unit tests ────────────────────────────────────────────────────
@@ -349,17 +596,12 @@ class TestVerifiablePresentation:
     def agent_setup(self, client, tmp_path, sample_charter):
         """Register an agent, manually persist key + VC, return (rc, did, pub_jwk, registry_did_doc)."""
         import re
-        import uuid
         from app.crypto import generate_ed25519_keypair, private_key_to_pem
         from registry_client import RegistryClient
 
         private_key, pub_jwk = generate_ed25519_keypair()
         agent_id = f"vptest{uuid.uuid4().hex[:6]}"
-        resp = client.post("/agents", json={
-            "agent_id": agent_id,
-            "public_key_jwk": pub_jwk,
-            "charter": sample_charter,
-        })
+        resp = register(client, agent_id, pub_jwk, sample_charter)
         assert resp.status_code == 201
         data = resp.json()
         did = data["did"]
@@ -443,17 +685,14 @@ class TestJWTFormats:
     def register(self, client):  # noqa: PT004 (class-scope instance method, pytest <10)
         from app.crypto import generate_ed25519_keypair
         _, pub_jwk = generate_ed25519_keypair()
-        resp = client.post("/agents", json={
-            "agent_id": "jwttest",
-            "public_key_jwk": pub_jwk,
-            "charter": {
-                "name": "napa-node-01",
-                "capabilities": ["observe", "publish"],
-                "scope": "Napa Valley environmental monitoring",
-                "intent": "Collect domain sensor data",
-                "operator": "did:web:test.example.com",
-            },
-        })
+        charter = {
+            "name": "napa-node-01",
+            "capabilities": ["observe", "publish"],
+            "scope": "Napa Valley environmental monitoring",
+            "intent": "Collect domain sensor data",
+            "operator": "did:web:test.example.com",
+        }
+        resp = register(client, "jwttest", pub_jwk, charter)
         assert resp.status_code == 201
 
     # ── /charter?format=jwt_vc ───────────────────────────────────────────────
@@ -466,7 +705,6 @@ class TestJWTFormats:
         assert len(parts) == 3, "JWT must be header.payload.signature"
 
     def test_jwt_vc_header_alg_is_eddsa(self, client):
-        import base64
         resp = client.get("/agents/jwttest/charter?format=jwt_vc")
         header_b64 = resp.text.split(".")[0]
         pad = 4 - len(header_b64) % 4
@@ -475,7 +713,6 @@ class TestJWTFormats:
         assert header["typ"] == "vc+jwt"
 
     def test_jwt_vc_payload_claims(self, client):
-        import base64
         resp = client.get("/agents/jwttest/charter?format=jwt_vc")
         payload_b64 = resp.text.split(".")[1]
         pad = 4 - len(payload_b64) % 4
@@ -486,10 +723,11 @@ class TestJWTFormats:
         assert "AgentCharterCredential" in payload["vc"]["type"]
         assert "cnf" in payload  # agent public key bound to credential
         assert payload["cnf"]["jwk"]["kty"] == "OKP"
+        assert "exp" in payload  # credential is time-bounded
+        assert payload["vc"]["credentialStatus"]["type"] == "BitstringStatusListEntry"
 
     def test_jwt_vc_signature_verifies(self, client):
         """Ed25519 signature on the VC-JWT must verify against the registry key."""
-        import base64
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
         jwt_str = client.get("/agents/jwttest/charter?format=jwt_vc").text
@@ -516,12 +754,10 @@ class TestJWTFormats:
     def test_sd_jwt_vc_has_disclosures(self, client):
         resp = client.get("/agents/jwttest/charter?format=sd_jwt_vc")
         parts = resp.text.split("~")
-        # parts[0] = JWT, parts[1:-1] = disclosures, parts[-1] = "" (trailing ~)
         disclosures = [p for p in parts[1:] if p]
         assert len(disclosures) > 0, "SD-JWT must have at least one disclosure"
 
     def test_sd_jwt_vc_jwt_header(self, client):
-        import base64
         resp = client.get("/agents/jwttest/charter?format=sd_jwt_vc")
         jwt_part = resp.text.split("~")[0]
         header_b64 = jwt_part.split(".")[0]
@@ -531,7 +767,6 @@ class TestJWTFormats:
         assert header["typ"] == "vc+sd-jwt"
 
     def test_sd_jwt_vc_payload_has_sd_digests(self, client):
-        import base64
         resp = client.get("/agents/jwttest/charter?format=sd_jwt_vc")
         jwt_part = resp.text.split("~")[0]
         payload_b64 = jwt_part.split(".")[1]
@@ -545,7 +780,6 @@ class TestJWTFormats:
 
     def test_sd_jwt_vc_disclosure_decodes_to_claim(self, client):
         """Each disclosure must decode to [salt, claim_name, claim_value]."""
-        import base64, hashlib
         resp = client.get("/agents/jwttest/charter?format=sd_jwt_vc")
         parts = resp.text.split("~")
         jwt_part = parts[0]
@@ -560,7 +794,6 @@ class TestJWTFormats:
             pad = 4 - len(disc_b64) % 4
             decoded = json.loads(base64.urlsafe_b64decode(disc_b64 + ("=" * pad if pad != 4 else "")))
             assert len(decoded) == 3, "Disclosure must be [salt, name, value]"
-            # Verify the digest is in the JWT payload
             digest = base64.urlsafe_b64encode(
                 hashlib.sha256(disc_b64.encode()).digest()
             ).rstrip(b"=").decode()
@@ -570,7 +803,6 @@ class TestJWTFormats:
 
     def test_make_jwt_vp_structure(self):
         """make_jwt_vp produces a valid three-part JWT with expected claims."""
-        import base64
         from app.crypto import generate_ed25519_keypair
         from app.jwt_vc import issue_vc_jwt, make_jwt_vp
 
@@ -595,7 +827,6 @@ class TestJWTFormats:
 
     def test_attach_key_binding_appends_kb_jwt(self):
         """attach_key_binding must append a kb+jwt after the last ~."""
-        import base64
         from app.crypto import generate_ed25519_keypair
         from app.jwt_vc import issue_sd_jwt_vc, attach_key_binding
 
@@ -617,4 +848,3 @@ class TestJWTFormats:
         header = json.loads(base64.urlsafe_b64decode(header_b64 + ("=" * pad if pad != 4 else "")))
         assert header["typ"] == "kb+jwt"
         assert header["alg"] == "EdDSA"
-

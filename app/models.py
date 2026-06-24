@@ -20,6 +20,9 @@ class Agent(SQLModel, table=True):
     # Signed W3C charter VC, stored as JSON string
     charter_vc: str = Field(sa_column=Column(Text))
 
+    # Bit owned by this agent in the published Bitstring Status List.
+    status_index: Optional[int] = Field(default=None, index=True)
+
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -32,3 +35,13 @@ class Agent(SQLModel, table=True):
 
     def get_charter_vc(self) -> dict:
         return json.loads(self.charter_vc)
+
+
+class ConsumedVoucher(SQLModel, table=True):
+    """Records spent enrollment voucher jti values — enforces single use."""
+
+    jti: str = Field(primary_key=True)
+    agent_id: str
+    consumed_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )

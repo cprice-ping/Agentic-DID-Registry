@@ -13,9 +13,18 @@ Two independent cryptographic checks at verification time:
      trusted registry, not self-asserted
 
 Usage:
-  # Make sure the registry is running locally first:
-  #   uvicorn app.main:app --reload
-  .venv/bin/python demo.py
+  # 1. Operator key the registry will trust (once):
+  #   python operator_cli.py keygen --out operator.key.pem
+  #   python operator_cli.py jwks --key operator.key.pem --out operator_jwks.json
+  #
+  # 2. Run the registry pointed at that JWKS:
+  #   OPERATOR_JWKS_PATH=operator_jwks.json uvicorn app.main:app --reload
+  #
+  # 3. Mint an enrollment voucher and run the demo:
+  #   export AGENT_ENROLLMENT_VOUCHER=$(python operator_cli.py voucher \
+  #       --key operator.key.pem --registry-did did:web:cpricedomain.net \
+  #       --agent-id demo-agent --capabilities observe,publish --ttl 600)
+  #   .venv/bin/python demo.py
 """
 import json
 import os
@@ -66,11 +75,20 @@ def main() -> None:
     print(f"  Registry: {REGISTRY_URL}")
     try:
         did = r.provision(charter)
+    except PermissionError as exc:
+        print(f"\n  ENROLLMENT REJECTED: {exc}")
+        print(
+            "\n  Self-enrollment needs an operator-signed voucher. Mint one:\n"
+            "    export AGENT_ENROLLMENT_VOUCHER=$(python operator_cli.py voucher \\\n"
+            "        --key operator.key.pem --registry-did <registry-did> \\\n"
+            f"        --agent-id {agent_name} --capabilities observe,publish --ttl 600)\n"
+        )
+        sys.exit(1)
     except Exception as exc:
         print(f"\n  ERROR: {exc}")
         print(
             "\n  Is the registry running?\n"
-            "    uvicorn app.main:app --reload\n"
+            "    OPERATOR_JWKS_PATH=operator_jwks.json uvicorn app.main:app --reload\n"
         )
         sys.exit(1)
 

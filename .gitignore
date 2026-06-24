@@ -19,6 +19,10 @@ registry.key.pem
 registry.db
 *.db
 
+# Operator enrollment keys (never commit the private key)
+operator.key.pem
+*.key.pem
+
 # Testing
 .pytest_cache/
 .coverage

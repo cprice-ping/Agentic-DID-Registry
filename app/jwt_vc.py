@@ -69,6 +69,8 @@ def issue_vc_jwt(
     private_key: Ed25519PrivateKey,
     verification_method: str,
     agent_public_key_jwk: Optional[dict] = None,
+    ttl_days: int = 0,
+    credential_status: Optional[dict] = None,
 ) -> str:
     """
     Issue a W3C VC Data Model v2 JWT-secured charter credential (vc+jwt).
@@ -89,21 +91,27 @@ def issue_vc_jwt(
     # credentialSubject carries charter claims; 'id' is at JWT 'sub' level
     credential_subject = {k: v for k, v in charter.items() if k != "id"}
 
+    vc: dict = {
+        "@context": [
+            "https://www.w3.org/ns/credentials/v2",
+            "https://cpricedomain.net/contexts/agent-charter/v1",
+        ],
+        "type": ["VerifiableCredential", "AgentCharterCredential"],
+        "credentialSubject": credential_subject,
+    }
+    if credential_status is not None:
+        vc["credentialStatus"] = credential_status
+
     payload: dict = {
         "iss": issuer_did,
         "sub": agent_did,
         "iat": now,
         "jti": jti,
-        "vc": {
-            "@context": [
-                "https://www.w3.org/ns/credentials/v2",
-                "https://cpricedomain.net/contexts/agent-charter/v1",
-            ],
-            "type": ["VerifiableCredential", "AgentCharterCredential"],
-            "credentialSubject": credential_subject,
-        },
+        "vc": vc,
     }
 
+    if ttl_days > 0:
+        payload["exp"] = now + ttl_days * 86400
     if agent_public_key_jwk:
         payload["cnf"] = {"jwk": _clean_jwk(agent_public_key_jwk)}
 
@@ -124,6 +132,8 @@ def issue_sd_jwt_vc(
     verification_method: str,
     agent_public_key_jwk: Optional[dict] = None,
     selectively_disclosable: Optional[list[str]] = None,
+    ttl_days: int = 0,
+    credential_status: Optional[dict] = None,
 ) -> str:
     """
     Issue an SD-JWT-VC (vc+sd-jwt).
@@ -167,6 +177,14 @@ def issue_sd_jwt_vc(
         "_sd": sorted(sd_digests),  # sorted for deterministic serialisation
     }
 
+    if ttl_days > 0:
+        payload["exp"] = now + ttl_days * 86400
+    # Revocation reference.  SD-JWT-VC's native form is IETF token-status-list;
+    # here we reference the same W3C Bitstring Status List the JSON-LD/JWT VCs use
+    # so there is a single source of revocation truth.  (Full token-status-list
+    # encoding is a follow-up — see README.)
+    if credential_status is not None:
+        payload["status"] = {"status_list": credential_status}
     if agent_public_key_jwk:
         payload["cnf"] = {"jwk": _clean_jwk(agent_public_key_jwk)}
 
