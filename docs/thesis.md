@@ -140,6 +140,65 @@ synthesis above plus the consumption adapters — not a bespoke issuer.
 - **DIF — "Authorising Autonomous Agents at Scale."**
   <https://blog.identity.foundation/building-ai-trust-at-scale-4/>
 
+## Applicability — when any of this is load-bearing (the collapse line)
+
+Agent identity is not always needed. The cheapest way to secure a boundary is to
+delete it, and a large class of agent interaction deletes it. There are two
+governance regimes, and most of this document only applies to the second.
+
+- **Regime A — visibility + confirmation.** The agent shares the human's live
+  session and view: in-page, same-origin, synchronous (e.g. a W3C WebMCP tool
+  invoked in the user's authenticated browser session). Governed by *watching*
+  (a live tool console) and *confirming* (elicitation / step-up). There is **no
+  agent-distinct principal** — the action authorizes from `sub` (the user) +
+  `client_id` (the channel/app) + request context. Reference:
+  `WebMCP-Demo-Retail`.
+- **Regime B — identity + policy.** The agent acts where it can't be watched:
+  server-side, asynchronous, cross-service, or agent-to-agent. Governed by *who
+  it is* and *what it is chartered for*. Reference: Notflux + this registry.
+
+The dividing line is observable: **can the human see and confirm the action, or
+not.** Not autonomy — *session co-presence*.
+
+Three clarifications that keep the line honest:
+
+- **WebMCP does not *solve* agent identity; it *dissolves the need* for it** in
+  Regime A. There is simply no agent-distinct principal to identify.
+- **`client_id` proves channel, not actor** — which app, not which agent.
+  Adequate only while the page is a trusted single-agent environment; it cannot
+  distinguish a trusted assistant from a prompt-injected or third-party agent
+  sharing the same session.
+- **The PDP is invariant across the line.** The same policy decision (e.g.
+  PingOne Authorize) runs in both regimes; only the *subject richness* changes —
+  `(user, channel)` in A, `(user, agent, delegation, charter)` in B. Agent
+  identity is **additional, minimal inputs to the same decision**, supplied only
+  when the session can't carry them — not a separate edifice.
+
+The collapse cannot reach four cases, which is where Regime B is forced:
+
+1. **Cross-service fan-out** — the second hop; session/token audience doesn't transfer.
+2. **Async / detached** — no live session to ride.
+3. **Server-side / headless** — no browser session to inhabit.
+4. **Agent-to-agent** — no human session threads through.
+
+(Plus high-consequence **attribution** even in-session: needing "the human's
+*agent* did this," not "the human did this," for audit/liability.)
+
+HITL and on-behalf-of don't pick a regime — they get cheap in A and require the
+apparatus in B:
+
+- **Regime A:** on-behalf-of is implicit (the agent *is* the session); HITL is
+  inline (elicitation). No apparatus.
+- **Regime B:** on-behalf-of must be encoded in a credential (`sub`/`act`, a
+  transaction token); HITL becomes out-of-band approval (CIBA / push) layered on
+  agent identity. Apparatus + step-up.
+
+**Design rule:** design from the *decision* and the *oversight* backward. Let
+boundaries collapse where they can (Regime A); provision identity *minimally and
+on-need* only for the residue (Regime B). The market routing around identity
+ceremony (WebMCP) is a **filter** that tells you where identity is actually
+load-bearing — not a threat to it.
+
 ## Honest calibration
 
 Not foolish — **early, and deliberately built to fail cheap if it is.** The
