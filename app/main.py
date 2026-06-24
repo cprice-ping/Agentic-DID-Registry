@@ -411,6 +411,67 @@ def get_agent_charter(
     return Response(content=sd_jwt_str, media_type="application/vc+sd-jwt")
 
 
+# ── Charter decision attributes (PIP / external attribute source) ─────────────
+
+@app.get(
+    "/agents/{agent_id}/attributes",
+    summary="Charter decision attributes",
+    tags=["Agents"],
+)
+def get_agent_attributes(agent_id: str, session: SessionDep) -> dict:
+    """
+    Lean, decision-shaped projection of the agent's charter for a policy engine /
+    external attribute source (PIP) to consume — the agent's *declared* context
+    (`capabilities` + `intent`) plus freshness/status.
+
+    This is **serving, not deciding**: it returns what the agent declares so a
+    consumer can compute `grant ∩ declared ∩ policy`. The authorization decision
+    stays with the consumer; nothing here is engine-specific.
+
+    Semantics differ from `/charter` deliberately, for a PIP caller:
+    - Always returns 200 for a known agent with an explicit `status`, so the
+      caller gets a positive attribute to decide on rather than an HTTP error to
+      interpret.
+    - A revoked or expired agent returns `status` != "active" **and** empty
+      `capabilities`, so a policy fails closed whether it gates on status or on
+      capabilities.
+    """
+    agent = session.exec(select(Agent).where(Agent.agent_id == agent_id)).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+
+    vc = agent.get_charter_vc()
+    subject = vc.get("credentialSubject", {})
+    valid_until = vc.get("validUntil")
+
+    revoked = agent.revoked_at is not None
+    expired = bool(
+        valid_until
+        and datetime.now(timezone.utc)
+        > datetime.strptime(valid_until, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    )
+    if revoked:
+        status = "revoked"
+    elif expired:
+        status = "expired"
+    else:
+        status = "active"
+
+    return {
+        "subject": agent.did,
+        "agent_id": agent.agent_id,
+        "issuer": _registry_did,
+        "status": status,
+        # fail closed: declared capabilities only surface for an active charter
+        "capabilities": subject.get("capabilities", []) if status == "active" else [],
+        "intent": subject.get("intent"),
+        "scope": subject.get("scope"),
+        "validFrom": vc.get("validFrom"),
+        "validUntil": valid_until,
+        "revokedAt": agent.revoked_at.isoformat() if revoked else None,
+    }
+
+
 # ── Key rotation ──────────────────────────────────────────────────────────────
 
 @app.post(

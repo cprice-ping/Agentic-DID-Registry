@@ -365,6 +365,43 @@ class TestCharterRetrieval:
         assert client.get("/agents/nobody/charter").status_code == 404
 
 
+# ── Charter decision attributes (PIP projection) ──────────────────────────────
+
+class TestCharterAttributes:
+    @pytest.fixture(autouse=True)
+    def register(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        register(client, "attrtest", pub_jwk, sample_charter)
+
+    def test_attributes_returns_declared_context(self, client):
+        a = client.get("/agents/attrtest/attributes").json()
+        assert a["subject"] == "did:web:test.example.com:agents:attrtest"
+        assert a["agent_id"] == "attrtest"
+        assert a["issuer"] == "did:web:test.example.com"
+        assert a["status"] == "active"
+        assert a["capabilities"] == ["observe", "publish"]
+        assert a["intent"]  # declared intent present
+        assert "validUntil" in a
+
+    def test_unknown_agent_returns_404(self, client):
+        assert client.get("/agents/nobody/attributes").status_code == 404
+
+    def test_revoked_agent_fails_closed(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        register(client, "attrrevoke", pub_jwk, sample_charter)
+        voucher = make_voucher("attrrevoke", purpose="revoke")
+        client.delete(
+            "/agents/attrrevoke", headers={"Authorization": f"Bearer {voucher}"}
+        )
+        # 200 (not 410) with an explicit status + empty capabilities → policy denies
+        resp = client.get("/agents/attrrevoke/attributes")
+        assert resp.status_code == 200
+        a = resp.json()
+        assert a["status"] == "revoked"
+        assert a["capabilities"] == []
+        assert a["revokedAt"] is not None
+
+
 # ── Bitstring Status List ─────────────────────────────────────────────────────
 
 class TestStatusList:

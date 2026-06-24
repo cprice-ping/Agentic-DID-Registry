@@ -96,6 +96,31 @@ So the three serializations line up: **OAP/AGNTCY = the portable at-rest format*
 single source** both derive from. Adopt OAP's field names where they exist; keep
 this repo as the issuer that emits them.
 
+## The concrete issuer endpoint the PIP calls
+
+`GET /agents/{id}/attributes` returns the lean, decision-shaped projection a PIP /
+policy engine binds to — the agent's *declared* context plus freshness/status:
+
+```json
+{
+  "subject": "did:web:reg.example.com:agents:napanode01",
+  "agent_id": "napanode01",
+  "issuer": "did:web:reg.example.com",
+  "status": "active",
+  "capabilities": ["observe", "publish"],
+  "intent": "observe + publish sensor data",
+  "scope": "Napa watershed",
+  "validFrom": "...", "validUntil": "...", "revokedAt": null
+}
+```
+
+PIP semantics (deliberately unlike `/charter`): always 200 for a known agent with
+an explicit `status`; a revoked or expired charter returns `status` != "active"
+**and** empty `capabilities`, so a policy fails closed whether it gates on status
+or on capabilities. This is *serving* (what the agent declares), not deciding —
+the consumer computes `requested-tool-class ⊆ capabilities ∩ SpiceDB-grant ∩
+policy`.
+
 ## What stays out (per the boundary)
 
 This doc describes how *consumers* project the charter. The projection logic —
