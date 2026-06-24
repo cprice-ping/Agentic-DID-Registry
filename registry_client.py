@@ -175,10 +175,15 @@ class RegistryClient:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def provision(self, charter: dict) -> str:
+    def provision(self, charter: dict, voucher: Optional[str] = None) -> str:
         """
         Generate a local Ed25519 keypair, register with the registry, and return
         the minted DID.
+
+        Self-enrollment requires an operator-signed enrollment voucher.  Pass it
+        via *voucher*, or set the ``AGENT_ENROLLMENT_VOUCHER`` env var.  The
+        voucher authorizes this ``agent_id`` and bounds the capabilities the
+        charter may claim.
 
         The private key is stored at ``~/.agent/keys/{did_slug}.pem`` (mode 0600).
         The signed charter VC is stored at ``~/.agent/charters/{did_slug}.json``.
@@ -188,6 +193,8 @@ class RegistryClient:
         ValueError
             If the charter has no ``name`` (or ``agent_id``) to derive an ID from,
             or if the agent_id is already registered.
+        PermissionError
+            If the enrollment voucher is missing or rejected.
         httpx.HTTPStatusError
             On unexpected HTTP errors from the registry.
         """
@@ -204,11 +211,20 @@ class RegistryClient:
             "charter": charter_claims,
         }
 
+        voucher = voucher or os.environ.get("AGENT_ENROLLMENT_VOUCHER")
+        headers = {"Authorization": f"Bearer {voucher}"} if voucher else {}
+
         with httpx.Client(timeout=self._http_timeout) as client:
-            response = client.post(f"{self._registry_url}/agents", json=payload)
+            response = client.post(
+                f"{self._registry_url}/agents", json=payload, headers=headers
+            )
 
         if response.status_code == 409:
             raise ValueError(f"Agent '{agent_id}' is already registered.")
+        if response.status_code in (401, 403):
+            raise PermissionError(
+                f"Enrollment voucher missing or rejected: {response.text}"
+            )
         response.raise_for_status()
 
         data = response.json()
@@ -471,6 +487,61 @@ class RegistryClient:
             audience=audience,
             nonce=nonce,
         )
+
+    def rotate(self, did: str) -> dict:
+        """
+        Rotate the agent's key: generate a fresh keypair, prove possession of the
+        current key, and submit the rotation.  The registry re-issues the charter
+        bound to the new key.
+
+        Authenticated entirely by the agent — the rotation request is signed with
+        the key being retired, so no operator voucher is needed.  On success the
+        new private key replaces the old one locally.
+
+        Returns the registry's rotation response (did, did_document, charter_vc).
+
+        Raises
+        ------
+        FileNotFoundError
+            If no local private key exists for *did*.
+        """
+        key_path = self._key_path(did)
+        if not key_path.exists():
+            raise FileNotFoundError(
+                f"No private key for {did!r}. Run registry.provision() first."
+            )
+        current_key = _load_private_key(key_path)
+
+        new_key = _generate_keypair()
+        new_public_key_jwk = _public_key_to_jwk(new_key.public_key())
+
+        # Prove possession of the current key over {did, new_public_key_jwk}.
+        proof = _make_proof(
+            current_key,
+            {"did": did, "new_public_key_jwk": new_public_key_jwk},
+            verification_method=f"{did}#key-1",
+            proof_purpose="authentication",
+        )
+
+        agent_id = self._did_to_agent_id(did)
+        if not agent_id:
+            raise ValueError(f"Cannot derive agent_id from DID: {did!r}")
+
+        with httpx.Client(timeout=self._http_timeout) as client:
+            resp = client.post(
+                f"{self._registry_url}/agents/{agent_id}/rotate",
+                json={"new_public_key_jwk": new_public_key_jwk, "proof": proof},
+            )
+            resp.raise_for_status()
+        data = resp.json()
+
+        # Persist the new key and refreshed charter only after the registry accepts.
+        _save_private_key(new_key, key_path)
+        charter_path = self._charter_path(did)
+        charter_path.parent.mkdir(parents=True, exist_ok=True)
+        charter_path.write_text(json.dumps(data["charter_vc"], indent=2))
+        self.invalidate_cache(did)
+        return data
 
     def invalidate_cache(self, did: Optional[str] = None) -> None:
         """Invalidate the verify cache for *did*, or clear it entirely."""

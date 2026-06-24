@@ -75,16 +75,73 @@ Agents handle their own keys.  The wallet layer is unnecessary:
 
 ## API
 
-| Method   | Path                          | Description                                  |
-|----------|-------------------------------|----------------------------------------------|
-| `GET`    | `/.well-known/did.json`       | Registry DID document (trust anchor)         |
-| `POST`   | `/agents`                     | Register agent → returns DID + charter VC    |
-| `GET`    | `/agents/{id}/did.json`       | Agent DID document (did:web resolution)      |
-| `GET`    | `/agents/{id}/charter`        | Agent charter as W3C VC                      |
-| `POST`   | `/agents/{id}/rotate`         | Key rotation — updates DID doc + re-issues VC|
-| `DELETE` | `/agents/{id}`                | Revocation — DID doc returns tombstone       |
+| Method   | Path                          | Auth                     | Description                                  |
+|----------|-------------------------------|--------------------------|----------------------------------------------|
+| `GET`    | `/.well-known/did.json`       | none                     | Registry DID document (trust anchor)         |
+| `GET`    | `/status/list`                | none                     | Bitstring Status List credential (revocation)|
+| `POST`   | `/agents`                     | operator voucher         | Register agent → returns DID + charter VC    |
+| `GET`    | `/agents/{id}/did.json`       | none                     | Agent DID document (did:web resolution)      |
+| `GET`    | `/agents/{id}/charter`        | none                     | Agent charter as W3C VC                      |
+| `POST`   | `/agents/{id}/rotate`         | agent self-proof         | Key rotation — updates DID doc + re-issues VC|
+| `DELETE` | `/agents/{id}`                | operator voucher (revoke)| Revocation — DID doc returns tombstone       |
 
 Interactive docs at `/docs` when the server is running.
+
+### Enrollment auth — operator-signed vouchers
+
+Identity bootstrapping can't authenticate itself: an agent holds no registry
+identity at the moment it asks to be issued one. The registry terminates that
+regress at an **operator-signed enrollment voucher** — a short-lived EdDSA JWT,
+signed by a key the registry trusts out-of-band, that authorizes exactly one
+`agent_id` and bounds the capabilities its charter may claim. The voucher is both
+the authentication *and* the vetting: the registry clamps the submitted charter
+to the grant, so it never signs capabilities the operator didn't authorize.
+
+```bash
+# Operator key, once. The registry trusts the public half (OPERATOR_JWKS_PATH).
+python operator_cli.py keygen --out operator.key.pem
+python operator_cli.py jwks  --key operator.key.pem --out operator_jwks.json
+
+# Per agent: mint a voucher the agent carries to its own first-boot enrollment.
+python operator_cli.py voucher \
+    --key operator.key.pem \
+    --registry-did did:web:cpricedomain.net \
+    --agent-id napanode01 \
+    --capabilities observe,publish \
+    --ttl 3600
+```
+
+The agent presents it as `Authorization: Bearer <voucher>` (the client reads
+`AGENT_ENROLLMENT_VOUCHER` automatically). Vouchers are single-use (`jti`),
+audience-bound to the registry DID, and expire.
+
+**The operating environment is not the identity.** An agent on a Raspberry Pi, in
+k8s, or on any cloud enrolls the same way. The trusted-issuer set is pluggable —
+a SPIFFE/SPIRE trust domain, a cloud workload-OIDC issuer, GitHub OIDC, or a TPM
+attestation service can be added as additional trusted issuers without changing
+the mint path. Where an agent runs can be carried as a *claim* in the charter; it
+qualifies how the identity is used, it doesn't define the identity.
+
+`POST /agents/{id}/rotate` is authenticated by the agent itself: the request
+carries a proof over `{did, new_public_key_jwk}` signed with the key being
+retired. Only the holder of the current private key can rotate — no voucher.
+
+### Credential lifetime & revocation
+
+Charters carry `validUntil` (`exp` in the JWT forms) bounded by `CHARTER_TTL_DAYS`.
+Because `jwt_vc` / `sd_jwt_vc` are verified offline, revocation needs more than a
+live `410`: the registry publishes a **W3C Bitstring Status List** credential at
+`/status/list`, and every charter carries a `credentialStatus` pointing at its
+bit. The bitstring is derived live from the agent table (bit set ⇔ revoked), so it
+can't drift. An offline verifier fetches the list once and checks the bit.
+
+> Note: `sd_jwt_vc` references the same Bitstring Status List via a `status` claim
+> rather than the IETF token-status-list encoding — single source of revocation
+> truth; native token-status-list is a follow-up.
+
+> did:web caveat: domains with a port require `%3A` encoding per spec, which the
+> registry does not yet apply (and the DID parsers assume an unported host). Use a
+> plain custom domain (no port) — the normal production case.
 
 ---
 
@@ -165,11 +222,19 @@ Any HTTPS-capable host works.
 
 **Environment variables:**
 
-| Variable             | Default              | Description                              |
-|----------------------|----------------------|------------------------------------------|
-| `REGISTRY_DOMAIN`    | `cpricedomain.net`   | Domain used in minted DIDs               |
-| `REGISTRY_KEY_PATH`  | `registry.key.pem`   | Path to the registry's Ed25519 private key |
-| `DATABASE_URL`       | `sqlite:///./registry.db` | SQLAlchemy database URL             |
+| Variable                     | Default                   | Description                                      |
+|------------------------------|---------------------------|--------------------------------------------------|
+| `REGISTRY_DOMAIN`            | `cpricedomain.net`        | Domain used in minted DIDs                       |
+| `REGISTRY_BASE_URL`         | `https://{REGISTRY_DOMAIN}` | Absolute base URL (used in `credentialStatus`) |
+| `REGISTRY_KEY_PATH`         | `registry.key.pem`        | Path to the registry's Ed25519 private key       |
+| `DATABASE_URL`              | `sqlite:///./registry.db` | SQLAlchemy database URL                          |
+| `OPERATOR_JWKS_PATH`        | `operator_jwks.json`      | Trusted operator public keys for enrollment      |
+| `REQUIRE_ENROLLMENT_VOUCHER`| `true`                    | Enforce vouchers on `POST /agents` / `DELETE`    |
+| `CHARTER_TTL_DAYS`          | `90`                      | Charter lifetime; `0` = no expiry                |
+
+> Pre-seed `registry.key.pem` into persistent storage before first boot rather
+> than letting the app generate it on first request — it's the root of all trust,
+> and auto-generation can race under multiple workers.
 
 **Docker (example):**
 
