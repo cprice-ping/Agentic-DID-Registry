@@ -29,7 +29,7 @@ unspecified. That gap — the Txn-Token carries `azd` but is agnostic about wher
 
 | Charter (standing) | Txn-Token (per-request) | Relationship |
 |---|---|---|
-| subject **DID** (self-owned identity) | `act.sub` (+ `act.sub_hash`) | **identifier → identity**: `act.sub` must point at / resolve to the charter DID. Carry the DID in `act` (e.g. `act.did`) or have the PIP resolve `sub_hash` → charter DID. |
+| subject **DID** (self-owned identity) | `act.sub` (carrying, or resolvable to, the agent DID) | **identifier → identity**: `act.sub` must point at / resolve to the charter DID. Carry the DID in `act` directly, or have the PIP resolve `act.sub` → charter DID. |
 | vouched-by / on-behalf-of | `sub` (principal) + `act` (actor) chain | charter sets the *standing* delegation; token carries the *live* one. Personal agent: `sub`=person, `act.sub`=agent DID. |
 | `capabilities` (`can`, the **ceiling**) | `azd` (authorization-details, the **slice**) | **`azd ⊆ charter.capabilities`** — attenuation. The charter is the independent ceiling over what `azd` may contain. |
 | `intent` (standing purpose) | `purp` (transaction purpose) | per-request `purp` must be consistent with charter `intent` (purpose-binding). |
@@ -40,13 +40,26 @@ unspecified. That gap — the Txn-Token carries `azd` but is agnostic about wher
 The three concerns stay cleanly separated end-to-end: **identity** = `act.sub` →
 charter DID; **affordance** = `azd ⊆ charter.can`; **environment** = `rctx`.
 
+### Store-safe encodings are not an identity layer (e.g. SpiceDB `sub_hash`)
+
+SpiceDB object ids can't contain colons, and colons are exactly what DIDs and OIDC
+subs are made of — so Notflux hashes `act.sub` into a colon-free `sub_hash`. That
+is a **store-local encoding of the identifier**, not a layer of identity: it sits
+*below* the identifier (identity → identifier → store encoding), is computed
+deterministically at the SpiceDB edge, and **need not travel in the token at all**.
+Propagating it as a token claim leaks one store's lexical constraint into the wire
+format — the boundary anti-pattern, at the storage layer. Keep it contained at the
+consumer; SpiceDB recomputes it from `act.sub` when it writes a tuple. (A
+*reversible* encoding avoids the lossy hash and the need to stash the raw id
+separately for audit, but that's a SpiceDB-edge detail, not a wire concern.)
+
 ## Where the charter enters the token lifecycle
 
 ```
 1. Agent holds charter (DID + capabilities, issuer-signed)        ← this repo
 2. Agent initiates a call → DaVinci RFC 8693 exchange (the TTS)
 3. AT EXCHANGE TIME the TTS resolves the charter (via the Registry PIP, by
-   act.sub / sub_hash → charter DID) and:
+   act.sub → charter DID) and:
      • binds act to the agent identity (= charter subject)
      • clamps azd to  charter.capabilities ∩ requested
      • sets purp consistent with charter.intent
