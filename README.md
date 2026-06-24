@@ -1,11 +1,20 @@
 # Agent Identity Registry
 
-A lightweight service that mints and manages `did:web` identities for autonomous
-agents — without human signup flows.
+An **issuer**. It mints `did:web` identities for autonomous agents and issues
+cryptographically signed charter Verifiable Credentials — without human signup
+flows. Private keys never leave the agent.
 
-The registry acts as a **trust anchor**, not an IDP.  It issues birthright DIDs and
-cryptographically signed charter Verifiable Credentials.  Private keys never leave
-the agent.
+That is the *whole* job. This repo issues; it does not consume. It makes no
+authorization decisions, runs no policy engine, and drives no presentation
+protocol. Read **[Scope & boundary](#scope--boundary)** before adding anything —
+the pull to make it do more is structural, and the boundary is here to resist it.
+
+> **Why this exists** — and where it plugs into the 2026 agent-identity field
+> (OAP, AGNTCY, IETF transaction-tokens-for-agents, WIMSE, A2A): see
+> **[docs/thesis.md](docs/thesis.md)**. Short version: the neutral *origin* of
+> portable, self-owned agent identity that no consuming system owns — identity
+> acquired *on need*, not at birth. Agents get identity like servers, not like
+> captured humans.
 
 ---
 
@@ -248,12 +257,51 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 ---
 
-## What this is NOT
+## Scope & boundary
 
-- Not an IDP — does not issue tokens, manage sessions, or handle human login
-- Not a PDS — does not store ATProto records or serve a firehose
-- Not a key custodian — private keys never reach the registry
-- Not an OID4VP holder — does not run the presentation protocol; see below
+This repo is the **issuance kernel**: charter out, operator voucher in,
+pattern-agnostic. It is deliberately the *only* thing it is. The full reasoning —
+why issuance is shared but consumption is not — lives in
+**[docs/scope-and-boundaries.md](docs/scope-and-boundaries.md)**; the short version:
+
+**Issuance is shared; consumption is pattern-specific.** Different agentic patterns
+consume a charter in incompatible ways because their *trust topology* differs:
+
+| | credential-model (e.g. Watershed) | policy-model (e.g. enterprise / PingOne) |
+|---|---|---|
+| Trust | peer-to-peer, decided by the consumer offline | centralized, decided by a PDP at the gate |
+| Authority | travels with the credential | computed at the gate, per request |
+| Verifier | a peer agent | an enterprise PDP (e.g. P1AZ + SpiceDB) |
+| The charter is | a presented capability | a PIP attribute |
+
+One issuer (this repo) can feed both. No single *consumption* design serves both —
+so consumption does not belong here.
+
+### This repo does NOT
+
+- **Make authorization decisions.** No PDP, no policy, no allow/deny. It issues
+  `can` + provenance; deciding `allowed` is the consumer's job.
+- **Run a presentation protocol.** Not an OID4VP holder; it does not drive Neo
+  presentation sessions (see [PingOne Neo / OID4VC compatibility](#pingone-neo--oid4vc-compatibility)).
+- **Know about any consumer's substrate.** No SpiceDB, no ATProto, no Kong, no
+  PIP, no token broker. **The moment this repo imports knowledge of SpiceDB or
+  ATProto, the boundary is broken** — that coupling belongs in the consuming repo.
+- **Issue OAuth tokens, manage sessions, or handle human login.** Not an IDP.
+- **Custody keys or store agent data.** Private keys never reach the registry;
+  it is not a PDS and serves no firehose.
+
+### Consumption lives in consuming repos
+
+Each verifier you own gets a thin adapter *in its own repo*:
+- credential-model → present the charter, verify two signatures offline.
+- policy-model → resolve the charter as an attribute into the PDP, intersect with
+  the local grant + policy.
+
+> Note: `registry_client.py`'s `present()` / `verify_presentation()` /
+> `present_jwt()` / `present_sd_jwt()` are a **reference consumer** for the
+> credential-model pattern, shipped for the demo and tests. They are consumption,
+> not issuance — their canonical home is the consuming agent, and they may move
+> out. Do not grow them here.
 
 ---
 
@@ -320,7 +368,16 @@ stays focused on identity issuance rather than protocol orchestration.
 
 ---
 
-## First consumer
+## Consumers
 
-[Agentic-Watershed](https://github.com/cprice-ping/Agentic-Watershed) —
-see `HANDOFF-watershed-registry.md` in that repo for the integration spec.
+This issuer is pattern-agnostic; each consumer adapts the charter in its own repo:
+
+- **credential-model** — [Agentic-Watershed](https://github.com/cprice-ping/Agentic-Watershed):
+  a subscriber verifies a presented charter offline (two signatures). See
+  `HANDOFF-watershed-registry.md` in that repo.
+- **policy-model** — an enterprise PDP (e.g. PingOne Authorize + SpiceDB) resolves
+  the charter as an attribute and intersects it with the local grant. The PIP /
+  policy wiring lives in the consuming repo, not here.
+
+See **[docs/scope-and-boundaries.md](docs/scope-and-boundaries.md)** for why the
+two consume differently and what stays out of this repo.
