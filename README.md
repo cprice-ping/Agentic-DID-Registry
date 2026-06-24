@@ -9,6 +9,13 @@ authorization decisions, runs no policy engine, and drives no presentation
 protocol. Read **[Scope & boundary](#scope--boundary)** before adding anything —
 the pull to make it do more is structural, and the boundary is here to resist it.
 
+> **Why this exists** — and where it plugs into the 2026 agent-identity field
+> (OAP, AGNTCY, IETF transaction-tokens-for-agents, WIMSE, A2A): see
+> **[docs/thesis.md](docs/thesis.md)**. Short version: the neutral *origin* of
+> portable, self-owned agent identity that no consuming system owns — identity
+> acquired *on need*, not at birth. Agents get identity like servers, not like
+> captured humans.
+
 ---
 
 ## Architecture
