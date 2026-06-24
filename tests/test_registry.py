@@ -386,6 +386,26 @@ class TestCharterAttributes:
     def test_unknown_agent_returns_404(self, client):
         assert client.get("/agents/nobody/attributes").status_code == 404
 
+    def test_resolve_by_did_returns_same_attributes(self, client):
+        did = "did:web:test.example.com:agents:attrtest"
+        by_id = client.get("/agents/attrtest/attributes").json()
+        by_did = client.get("/resolve", params={"subject": did}).json()
+        assert by_did == by_id
+        assert by_did["subject"] == did
+        assert by_did["capabilities"] == ["observe", "publish"]
+
+    def test_resolve_foreign_did_rejected(self, client):
+        resp = client.get(
+            "/resolve", params={"subject": "did:web:other.example.com:agents:attrtest"}
+        )
+        assert resp.status_code == 400
+
+    def test_resolve_unknown_agent_404(self, client):
+        resp = client.get(
+            "/resolve", params={"subject": "did:web:test.example.com:agents:ghost"}
+        )
+        assert resp.status_code == 404
+
     def test_revoked_agent_fails_closed(self, client, sample_charter, agent_keypair):
         pub_jwk, _ = agent_keypair
         register(client, "attrrevoke", pub_jwk, sample_charter)

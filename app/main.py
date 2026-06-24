@@ -413,33 +413,15 @@ def get_agent_charter(
 
 # ── Charter decision attributes (PIP / external attribute source) ─────────────
 
-@app.get(
-    "/agents/{agent_id}/attributes",
-    summary="Charter decision attributes",
-    tags=["Agents"],
-)
-def get_agent_attributes(agent_id: str, session: SessionDep) -> dict:
+def _charter_attributes(agent: Agent) -> dict:
     """
-    Lean, decision-shaped projection of the agent's charter for a policy engine /
-    external attribute source (PIP) to consume — the agent's *declared* context
-    (`capabilities` + `intent`) plus freshness/status.
+    Lean, decision-shaped projection of an agent's charter — its *declared*
+    context (`capabilities` + `intent`) plus freshness/status.
 
-    This is **serving, not deciding**: it returns what the agent declares so a
-    consumer can compute `grant ∩ declared ∩ policy`. The authorization decision
-    stays with the consumer; nothing here is engine-specific.
-
-    Semantics differ from `/charter` deliberately, for a PIP caller:
-    - Always returns 200 for a known agent with an explicit `status`, so the
-      caller gets a positive attribute to decide on rather than an HTTP error to
-      interpret.
-    - A revoked or expired agent returns `status` != "active" **and** empty
-      `capabilities`, so a policy fails closed whether it gates on status or on
-      capabilities.
+    Serving, not deciding. Fails closed: a revoked or expired charter reports
+    `status` != "active" **and** empty `capabilities`, so a consuming policy
+    denies whether it gates on status or on capabilities.
     """
-    agent = session.exec(select(Agent).where(Agent.agent_id == agent_id)).first()
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found.")
-
     vc = agent.get_charter_vc()
     subject = vc.get("credentialSubject", {})
     valid_until = vc.get("validUntil")
@@ -462,7 +444,6 @@ def get_agent_attributes(agent_id: str, session: SessionDep) -> dict:
         "agent_id": agent.agent_id,
         "issuer": _registry_did,
         "status": status,
-        # fail closed: declared capabilities only surface for an active charter
         "capabilities": subject.get("capabilities", []) if status == "active" else [],
         "intent": subject.get("intent"),
         "scope": subject.get("scope"),
@@ -470,6 +451,50 @@ def get_agent_attributes(agent_id: str, session: SessionDep) -> dict:
         "validUntil": valid_until,
         "revokedAt": agent.revoked_at.isoformat() if revoked else None,
     }
+
+
+@app.get(
+    "/agents/{agent_id}/attributes",
+    summary="Charter decision attributes (by agent_id)",
+    tags=["Agents"],
+)
+def get_agent_attributes(agent_id: str, session: SessionDep) -> dict:
+    """
+    Decision attributes for a policy engine / external attribute source (PIP),
+    keyed by `agent_id`. See `/resolve` to key by the full subject DID — the
+    natural fit when a token's `act.sub` carries the DID verbatim.
+    """
+    agent = session.exec(select(Agent).where(Agent.agent_id == agent_id)).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+    return _charter_attributes(agent)
+
+
+@app.get(
+    "/resolve",
+    summary="Resolve a subject DID to charter decision attributes",
+    tags=["Agents"],
+)
+def resolve_subject(subject: str, session: SessionDep) -> dict:
+    """
+    Decision attributes keyed by the full agent **DID** — so a policy engine can
+    pass a token's `act.sub` (the DID) verbatim, with no segment parsing.
+
+    The DID is the foreign key everything maps through: `act.sub` in the token, a
+    reversible store-encoding in the consumer's relationship store, and this
+    lookup in the registry. Validates the DID belongs to this registry.
+    """
+    prefix = f"{_registry_did}:agents:"
+    if not subject.startswith(prefix) or len(subject) <= len(prefix):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Subject {subject!r} is not an agent DID of this registry ({_registry_did}).",
+        )
+    agent_id = subject[len(prefix):]
+    agent = session.exec(select(Agent).where(Agent.agent_id == agent_id)).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+    return _charter_attributes(agent)
 
 
 # ── Key rotation ──────────────────────────────────────────────────────────────
