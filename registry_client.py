@@ -100,6 +100,49 @@ def _jcs(obj: dict) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
+# ── Multibase base58btc ('z') — eddsa-jcs-2022 proofValue encoding ────────────
+
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_B58_INDEX = {c: i for i, c in enumerate(_B58)}
+
+
+def _b58btc_encode(data: bytes) -> str:
+    n = int.from_bytes(data, "big")
+    out = ""
+    while n > 0:
+        n, r = divmod(n, 58)
+        out = _B58[r] + out
+    pad = len(data) - len(data.lstrip(b"\x00"))
+    return "1" * pad + out
+
+
+def _b58btc_decode(s: str) -> bytes:
+    n = 0
+    for ch in s:
+        n = n * 58 + _B58_INDEX[ch]
+    body = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    pad = len(s) - len(s.lstrip("1"))
+    return b"\x00" * pad + body
+
+
+def _decode_multibase(value: str) -> Optional[bytes]:
+    try:
+        if value.startswith("z"):
+            return _b58btc_decode(value[1:])
+        if value.startswith("u"):
+            return _b64url_decode(value[1:])
+    except Exception:
+        return None
+    return None
+
+
+def _proof_config(proof_options: dict, doc: dict) -> dict:
+    """eddsa-jcs-2022 proof config carries the document @context when present."""
+    if "@context" in doc:
+        return {"@context": doc["@context"], **proof_options}
+    return dict(proof_options)
+
+
 def _make_proof(
     private_key: Ed25519PrivateKey,
     doc: dict,
@@ -114,11 +157,11 @@ def _make_proof(
         "proofPurpose": proof_purpose,
     }
     hash_input = (
-        hashlib.sha256(_jcs(proof_options)).digest()
+        hashlib.sha256(_jcs(_proof_config(proof_options, doc))).digest()
         + hashlib.sha256(_jcs(doc)).digest()
     )
     signature = private_key.sign(hash_input)
-    return {**proof_options, "proofValue": "u" + _b64url_encode(signature)}
+    return {**proof_options, "proofValue": "z" + _b58btc_encode(signature)}
 
 
 def _verify_proof(doc: dict, public_key_jwk: dict) -> bool:
@@ -126,15 +169,14 @@ def _verify_proof(doc: dict, public_key_jwk: dict) -> bool:
     proof = doc.get("proof")
     if not proof:
         return False
-    proof_value = proof.get("proofValue", "")
-    if not proof_value.startswith("u"):
+    signature = _decode_multibase(proof.get("proofValue", ""))
+    if signature is None:
         return False
     try:
-        signature = _b64url_decode(proof_value[1:])
         proof_options = {k: v for k, v in proof.items() if k != "proofValue"}
         doc_without_proof = {k: v for k, v in doc.items() if k != "proof"}
         hash_input = (
-            hashlib.sha256(_jcs(proof_options)).digest()
+            hashlib.sha256(_jcs(_proof_config(proof_options, doc_without_proof))).digest()
             + hashlib.sha256(_jcs(doc_without_proof)).digest()
         )
         raw = _b64url_decode(public_key_jwk["x"])

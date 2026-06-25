@@ -361,6 +361,45 @@ class TestCharterRetrieval:
         )
         assert verify_document_proof(vc, pub_key_jwk), "Charter VC signature is invalid"
 
+    def test_ldp_vc_proofvalue_is_base58btc(self, client):
+        """eddsa-jcs-2022 mandates multibase base58btc ('z'), not base64url ('u')."""
+        vc = client.get("/agents/chartertest/charter").json()
+        assert vc["proof"]["proofValue"].startswith("z")
+
+    def test_ldp_vc_proof_is_spec_shaped(self, client):
+        """
+        Independently reconstruct the eddsa-jcs-2022 hash and verify the signature
+        — proving the wire format matches the spec (base58btc proofValue + the
+        document @context folded into the proofConfig), not just self-consistency.
+        """
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        from app.crypto import b58btc_decode, jcs
+
+        vc = client.get("/agents/chartertest/charter").json()
+        registry_doc = client.get("/.well-known/did.json").json()
+        vm_id = vc["proof"]["verificationMethod"]
+        pub_x = next(
+            vm["publicKeyJwk"]["x"]
+            for vm in registry_doc["verificationMethod"]
+            if vm["id"] == vm_id
+        )
+
+        def _dec(s):
+            pad = 4 - len(s) % 4
+            return base64.urlsafe_b64decode(s + ("=" * pad if pad != 4 else ""))
+
+        pub = Ed25519PublicKey.from_public_bytes(_dec(pub_x))
+        signature = b58btc_decode(vc["proof"]["proofValue"][1:])  # strip 'z'
+
+        proof_options = {k: v for k, v in vc["proof"].items() if k != "proofValue"}
+        doc = {k: v for k, v in vc.items() if k != "proof"}
+        proof_config = {"@context": doc["@context"], **proof_options}
+        hash_data = (
+            hashlib.sha256(jcs(proof_config)).digest()
+            + hashlib.sha256(jcs(doc)).digest()
+        )
+        pub.verify(signature, hash_data)  # raises InvalidSignature if wrong
+
     def test_unknown_agent_returns_404(self, client):
         assert client.get("/agents/nobody/charter").status_code == 404
 
@@ -678,6 +717,18 @@ class TestCrypto:
         _, other_pub_jwk = generate_ed25519_keypair()
         signed = sign_document({"hello": "world"}, private_key, "did:web:test#key-1")
         assert not verify_document_proof(signed, other_pub_jwk)
+
+    def test_base58btc_roundtrip(self):
+        import os
+        from app.crypto import b58btc_encode, b58btc_decode
+        for data in (b"", b"\x00", b"\x00\x00\x01\x02", os.urandom(64)):
+            assert b58btc_decode(b58btc_encode(data)) == data
+
+    def test_signed_doc_uses_z_multibase(self):
+        from app.crypto import generate_ed25519_keypair, sign_document
+        priv, _ = generate_ed25519_keypair()
+        signed = sign_document({"@context": ["x"], "a": 1}, priv, "did:web:test#key-1")
+        assert signed["proof"]["proofValue"].startswith("z")
 
 
 # ── Voucher unit tests ────────────────────────────────────────────────────────

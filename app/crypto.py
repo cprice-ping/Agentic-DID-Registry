@@ -93,13 +93,61 @@ def verify_bytes(public_key_jwk: dict, data: bytes, signature: bytes) -> bool:
 def jcs(obj: dict) -> bytes:
     """
     Simplified JCS (JSON Canonicalization Scheme, RFC 8785).
-    Sufficient for the well-typed payloads produced by this registry.
-    Handles nested dicts/lists, strings, numbers, booleans, and None.
+    Byte-identical to RFC 8785 for the string/array/object payloads this registry
+    signs (no floats); not a full RFC 8785 implementation.
     """
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
+# ── Multibase base58btc ('z') — the proofValue encoding eddsa-jcs-2022 mandates ─
+
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_B58_INDEX = {c: i for i, c in enumerate(_B58)}
+
+
+def b58btc_encode(data: bytes) -> str:
+    n = int.from_bytes(data, "big")
+    out = ""
+    while n > 0:
+        n, r = divmod(n, 58)
+        out = _B58[r] + out
+    pad = len(data) - len(data.lstrip(b"\x00"))
+    return "1" * pad + out
+
+
+def b58btc_decode(s: str) -> bytes:
+    n = 0
+    for ch in s:
+        n = n * 58 + _B58_INDEX[ch]
+    body = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    pad = len(s) - len(s.lstrip("1"))
+    return b"\x00" * pad + body
+
+
+def decode_multibase(value: str) -> "bytes | None":
+    """Decode a multibase proofValue: 'z' = base58btc (spec), 'u' = base64url (legacy)."""
+    try:
+        if value.startswith("z"):
+            return b58btc_decode(value[1:])
+        if value.startswith("u"):
+            return b64url_decode(value[1:])
+    except Exception:
+        return None
+    return None
+
+
 # ── Data Integrity Proof (eddsa-jcs-2022) ────────────────────────────────────
+
+def _proof_config(proof_options: dict, doc: dict) -> dict:
+    """
+    The proof configuration hashed by eddsa-jcs-2022 carries the document's
+    @context when present, per the W3C vc-di-eddsa cryptosuite. (JCS sorts keys,
+    so insertion order is irrelevant.)
+    """
+    if "@context" in doc:
+        return {"@context": doc["@context"], **proof_options}
+    return dict(proof_options)
+
 
 def sign_document(
     doc: dict,
@@ -110,8 +158,9 @@ def sign_document(
     """
     Add a Data Integrity Proof to *doc* using the eddsa-jcs-2022 cryptosuite.
 
-    Signing input: sha256(JCS(proofOptions)) ‖ sha256(JCS(doc_without_proof))
-    proofValue  : multibase base64url ('u' prefix)
+    Signing input: sha256(JCS(proofConfig)) ‖ sha256(JCS(doc_without_proof)),
+    where proofConfig is the proof options plus the document @context.
+    proofValue  : multibase base58btc ('z' prefix), per spec.
     """
     proof_options: dict = {
         "type": "DataIntegrityProof",
@@ -122,11 +171,11 @@ def sign_document(
     }
 
     hash_input = (
-        hashlib.sha256(jcs(proof_options)).digest()
+        hashlib.sha256(jcs(_proof_config(proof_options, doc))).digest()
         + hashlib.sha256(jcs(doc)).digest()
     )
     signature = sign_bytes(private_key, hash_input)
-    proof_value = "u" + b64url_encode(signature)
+    proof_value = "z" + b58btc_encode(signature)
 
     return {**doc, "proof": {**proof_options, "proofValue": proof_value}}
 
@@ -134,26 +183,21 @@ def sign_document(
 def verify_document_proof(doc: dict, public_key_jwk: dict) -> bool:
     """
     Verify a Data Integrity Proof (eddsa-jcs-2022) on *doc*.
-    Returns True only if the signature is valid.
+    Accepts base58btc ('z', spec) and base64url ('u', legacy) proofValues.
     """
     proof = doc.get("proof")
     if not proof:
         return False
 
-    proof_value = proof.get("proofValue", "")
-    if not proof_value.startswith("u"):
-        return False  # only base64url multibase supported
-
-    try:
-        signature = b64url_decode(proof_value[1:])
-    except Exception:
+    signature = decode_multibase(proof.get("proofValue", ""))
+    if signature is None:
         return False
 
     proof_options = {k: v for k, v in proof.items() if k != "proofValue"}
     doc_without_proof = {k: v for k, v in doc.items() if k != "proof"}
 
     hash_input = (
-        hashlib.sha256(jcs(proof_options)).digest()
+        hashlib.sha256(jcs(_proof_config(proof_options, doc_without_proof))).digest()
         + hashlib.sha256(jcs(doc_without_proof)).digest()
     )
     return verify_bytes(public_key_jwk, hash_input, signature)

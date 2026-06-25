@@ -86,12 +86,15 @@ the *shape of what we emit*:
   structure, the `credentialStatus`/status entry shape. Edit the producers; no new
   behavior. The producers are centralized precisely so this stays a templating
   change.
-- **Small targeted code:** the signature envelope. Our `eddsa-jcs-2022` `ldp_vc`
-  uses multibase `u`/base64url where the W3C suite mandates `z`/base58btc, and
-  omits the proof `@context` — already flagged as non-interop. *This is the one
-  existing deviation to fix first* when real interop matters; it's a few lines in
-  `app/crypto.py`, not a redesign. (Adopting VC-JOSE-COSE or a specific JWT `typ`
-  profile, if a draft mandates one, is similarly localized.)
+- **Small targeted code:** the signature envelope. ✅ *Done* — `ldp_vc` now uses
+  multibase `z`/base58btc (per the W3C suite) and folds the document `@context`
+  into the proofConfig before hashing, so the proof is eddsa-jcs-2022-shaped and
+  independently verifiable (see `test_ldp_vc_proof_is_spec_shaped`). Remaining
+  caveat: `jcs()` is a simplified canonicalizer — byte-identical to RFC 8785 for
+  our string/array payloads (no floats) but not a certified RFC 8785 lib; swap in
+  a full one only if a strict external verifier requires it. (Adopting
+  VC-JOSE-COSE or a specific JWT `typ` profile, if a draft mandates one, is
+  similarly localized.)
 - **The one genuinely behavioral exception — credential lifetime model.** The
   agent drafts (ACAP "short-lived JWT", klrc "short-lived credentials") lean on
   **short-lived, frequently-reissued** creds *instead of* a revocation list. We do
@@ -116,6 +119,7 @@ Keep the producers flexible (they are) and revisit when:
 - **AIP / ACAP reach `-02`+ with WG adoption** (aligns the charter + framing), or
 - a consumer you own (P1AZ, an A2A peer) needs a specific profile to interop.
 
-First concrete conformance step when that day comes: fix the `eddsa-jcs-2022`
-multibase (`u`→`z`) so `ldp_vc` is verifiable by standard verifiers — the one
-deviation that blocks external interop today.
+The `eddsa-jcs-2022` envelope deviation (multibase `u`→`z` + proofConfig
+`@context`) is already fixed, so `ldp_vc` is structurally standards-verifiable
+today; the next conformance steps are format/lifetime choices that wait on a draft
+picking a lane.
