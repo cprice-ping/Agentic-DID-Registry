@@ -195,6 +195,12 @@ class TestAgentRegistration:
         assert subject["capabilities"] == ["observe", "publish"]
         assert "proof" in vc
 
+    def test_charter_context_uses_registry_domain(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        vc = register(client, "ctxtest", pub_jwk, sample_charter).json()["charter_vc"]
+        assert "https://test.example.com/contexts/agent-charter/v1" in vc["@context"]
+        assert all("cpricedomain.net" not in c for c in vc["@context"])
+
     def test_charter_has_validity_and_status(self, client, sample_charter, agent_keypair):
         pub_jwk, _ = agent_keypair
         vc = register(client, "napaexpiry", pub_jwk, sample_charter).json()["charter_vc"]

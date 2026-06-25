@@ -11,6 +11,7 @@ from typing import Optional
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from app.config import REGISTRY_BASE_URL
 from app.crypto import sign_document
 
 
@@ -41,7 +42,7 @@ def build_charter_vc(
     vc: dict = {
         "@context": [
             "https://www.w3.org/ns/credentials/v2",
-            "https://cpricedomain.net/contexts/agent-charter/v1",
+            f"{REGISTRY_BASE_URL}/contexts/agent-charter/v1",
         ],
         "id": vc_id,
         "type": ["VerifiableCredential", "AgentCharterCredential"],
