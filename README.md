@@ -40,6 +40,49 @@ store private key  ~/.agent/keys/{did}.pem
 store charter VC   ~/.agent/charters/{did}.json
 ```
 
+### Lifecycle & enforcement (the model to re-read when you forget)
+
+Three artifacts, three lifetimes — don't conflate them:
+
+| Artifact | Lifetime | Who signs it | Role |
+|----------|----------|--------------|------|
+| **Voucher** | seconds–minutes, **single-use** | the **operator** (offline; private key never on the server) | the enrollment grant — defines the capability **ceiling** |
+| **Charter VC** | **long-lived / standing** (`CHARTER_TTL_DAYS`) | the **registry** | the agent's durable identity + bounded capabilities; what it holds and re-presents |
+| **Resource Bearer** | **short-lived** (mins–hrs) | the consumer's **token service** (e.g. PingOne) | what the agent swaps its charter/DID for and actually sends to a resource / MCP server |
+
+**The voucher *bounds*; the agent *asserts*; the registry *clamps*.** Capabilities
+are never copied from the voucher into the charter — the agent declares its
+capabilities in the charter it submits, and the registry issues
+`charter ≤ voucher`. An empty charter yields an empty charter; an over-claim
+(`[...,admin]` against an `[observe,publish]` voucher) is rejected `403`.
+
+**"Within scope" is enforced at two gates — and the registry is only the first:**
+
+1. **Mint-time (Registry):** `charter ≤ voucher`. The operator's ceiling is baked
+   into the credential; the registry refuses to sign beyond it. The agent can
+   never *hold* a charter that exceeds the grant.
+2. **Run-time (PDP, e.g. PingOne Authorize):** `requested action ≤ charter ∩ policy
+   ∩ context`. The PDP uses the charter (via `/resolve`, or read from a carried
+   `jwt_vc`) to bound what the agent may *do now*. The agent can never *exercise*
+   beyond its charter.
+
+**The registry is not in the request path.** It bounds the *credential* at
+issuance and then serves as a PIP the PDP consults (`/resolve`, `/verify`).
+Runtime enforcement is the consumer's PDP, not the registry.
+
+Scope **only ever narrows** across hops: an agent can mint a more-attenuated token
+for a downstream agent, never a wider one — every hop re-checks against the
+charter ceiling.
+
+> One sentence: *the operator sets the ceiling (voucher); the registry bakes it
+> into a standing credential (charter) and refuses to exceed it; the agent swaps
+> that charter for a short-lived resource Bearer; and the PDP enforces, per
+> request, that the action stays within the charter — scope only ever narrowing.*
+
+See [docs/charter-mapping.md](docs/charter-mapping.md) for how the charter
+projects onto a Transaction Token (`azd ⊆ charter.can`) and
+[docs/thesis.md](docs/thesis.md) for *why* identity is the minimal join key here.
+
 ### DID document format
 
 Standard W3C DID document served at the `did:web` resolution URL:
