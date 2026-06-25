@@ -422,6 +422,94 @@ class TestCharterAttributes:
         assert a["revokedAt"] is not None
 
 
+# ── Presentation verification (POST /verify, wallet-less) ─────────────────────
+
+class TestPresentationVerification:
+    @pytest.fixture()
+    def presented(self, client, sample_charter):
+        """Register an agent and return a make_vp() that signs a VP with its key."""
+        from app.crypto import generate_ed25519_keypair, sign_document
+        priv, jwk = generate_ed25519_keypair()
+        aid = f"verify{uuid.uuid4().hex[:8]}"
+        data = register(client, aid, jwk, sample_charter).json()
+        did, charter_vc = data["did"], data["charter_vc"]
+
+        def make_vp(challenge=None):
+            vp = {
+                "@context": ["https://www.w3.org/ns/credentials/v2"],
+                "type": ["VerifiablePresentation"],
+                "holder": did,
+                "verifiableCredential": [charter_vc],
+            }
+            if challenge:
+                vp["challenge"] = challenge
+            return sign_document(vp, priv, f"{did}#key-1", proof_purpose="authentication")
+
+        return aid, did, priv, charter_vc, make_vp
+
+    def test_valid_presentation(self, client, presented):
+        _, did, _, _, make_vp = presented
+        r = client.post("/verify", json={"presentation": make_vp()}).json()
+        assert r["valid"] is True
+        assert r["holder_signature_valid"] and r["charter_signature_valid"]
+        assert r["status"] == "active"
+        assert r["holder"] == did
+        assert r["claims"]["capabilities"] == ["observe", "publish"]
+
+    def test_challenge_enforced(self, client, presented):
+        *_, make_vp = presented
+        vp = make_vp(challenge="nonce-1")
+        ok = client.post("/verify", json={"presentation": vp, "challenge": "nonce-1"}).json()
+        assert ok["valid"] is True
+        bad = client.post("/verify", json={"presentation": vp, "challenge": "nonce-2"}).json()
+        assert bad["valid"] is False
+        assert "Challenge" in bad["error"]
+
+    def test_tampered_presentation_rejected(self, client, presented):
+        *_, make_vp = presented
+        tampered = {**make_vp(), "holder": "did:web:test.example.com:agents:impostor"}
+        r = client.post("/verify", json={"presentation": tampered}).json()
+        assert r["valid"] is False
+        # holder swapped to an unknown agent → caught as unknown holder
+        assert "Unknown holder" in r["error"]
+
+    def test_tampered_credential_rejected(self, client, presented):
+        """Mutating the VP body after signing invalidates the holder signature."""
+        from app.crypto import generate_ed25519_keypair
+        _, did, priv, charter_vc, make_vp = presented
+        vp = make_vp()
+        vp["verifiableCredential"][0]["credentialSubject"]["capabilities"] = ["admin"]
+        r = client.post("/verify", json={"presentation": vp}).json()
+        assert r["valid"] is False
+        assert r["holder_signature_valid"] is False
+
+    def test_unknown_holder(self, client):
+        from app.crypto import generate_ed25519_keypair, sign_document
+        priv, _ = generate_ed25519_keypair()
+        did = "did:web:test.example.com:agents:ghostagent"
+        vp = sign_document(
+            {"@context": ["https://www.w3.org/ns/credentials/v2"],
+             "type": ["VerifiablePresentation"], "holder": did,
+             "verifiableCredential": [{"x": 1}]},
+            priv, f"{did}#key-1", proof_purpose="authentication",
+        )
+        r = client.post("/verify", json={"presentation": vp}).json()
+        assert r["valid"] is False
+        assert "Unknown holder" in r["error"]
+
+    def test_revoked_holder_fails_closed_but_sigs_still_valid(self, client, presented):
+        aid, did, _, _, make_vp = presented
+        vp = make_vp()
+        voucher = make_voucher(aid, purpose="revoke")
+        client.delete(f"/agents/{aid}", headers={"Authorization": f"Bearer {voucher}"})
+        r = client.post("/verify", json={"presentation": vp}).json()
+        assert r["valid"] is False
+        assert r["status"] == "revoked"
+        # the signatures themselves remain cryptographically valid
+        assert r["holder_signature_valid"] is True
+        assert r["charter_signature_valid"] is True
+
+
 # ── Bitstring Status List ─────────────────────────────────────────────────────
 
 class TestStatusList:

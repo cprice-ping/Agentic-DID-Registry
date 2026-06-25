@@ -96,10 +96,31 @@ Agents handle their own keys.  The wallet layer is unnecessary:
 | `POST`   | `/agents`                     | operator voucher         | Register agent → returns DID + charter VC    |
 | `GET`    | `/agents/{id}/did.json`       | none                     | Agent DID document (did:web resolution)      |
 | `GET`    | `/agents/{id}/charter`        | none                     | Agent charter as W3C VC                      |
+| `GET`    | `/agents/{id}/attributes`     | none                     | Decision attributes (PIP), keyed by agent_id |
+| `GET`    | `/resolve?subject={did}`      | none                     | Decision attributes keyed by the full DID    |
+| `POST`   | `/verify`                     | none                     | Verify a presentation (wallet-less, 2 sigs)  |
 | `POST`   | `/agents/{id}/rotate`         | agent self-proof         | Key rotation — updates DID doc + re-issues VC|
 | `DELETE` | `/agents/{id}`                | operator voucher (revoke)| Revocation — DID doc returns tombstone       |
 
 Interactive docs at `/docs` when the server is running.
+
+### Agent-native verification — no wallet, no presentation-request round-trip
+
+The two consumption-side verification shapes, by regime (both wallet-less — the
+OID4VP/wallet round-trip exists only to let a *human* consent, and agents sign):
+
+- **policy-model** — `GET /resolve?subject={did}` (or `/agents/{id}/attributes`):
+  *verification by lookup.* A PDP that already holds the identifier resolves the
+  declared context + status. Fails closed: revoked/expired → `status != "active"`
+  and empty `capabilities`.
+- **credential-model** — `POST /verify`: *offline presentation verify.* The agent
+  signs a Verifiable Presentation with its own key; this checks the holder
+  signature (against the agent's current key) + the registry signature on the
+  embedded charter, plus current status. Returns `{valid, claims, status, …}`.
+
+Both are **verification primitives, not decisions** — they return validity /
+claims / attributes, never permit/deny. The authorization decision stays with the
+consumer (see [Scope & boundary](#scope--boundary)).
 
 ### Enrollment auth — operator-signed vouchers
 
