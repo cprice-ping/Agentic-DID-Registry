@@ -55,6 +55,7 @@ from app.schemas import (
     AgentRegistrationResponse,
     KeyRotationRequest,
     KeyRotationResponse,
+    VerificationRequest,
 )
 from app.status_list import (
     build_encoded_list,
@@ -409,6 +410,179 @@ def get_agent_charter(
         credential_status=credential_status,
     )
     return Response(content=sd_jwt_str, media_type="application/vc+sd-jwt")
+
+
+# ── Charter decision attributes (PIP / external attribute source) ─────────────
+
+def _agent_id_from_did(did: str) -> Optional[str]:
+    """Extract the agent_id from a DID minted by this registry, else None."""
+    prefix = f"{_registry_did}:agents:"
+    if did and did.startswith(prefix) and len(did) > len(prefix):
+        return did[len(prefix):]
+    return None
+
+
+def _agent_status(agent: Agent) -> str:
+    """active | revoked | expired — the freshness/validity of the agent's charter."""
+    if agent.revoked_at is not None:
+        return "revoked"
+    valid_until = agent.get_charter_vc().get("validUntil")
+    if valid_until and datetime.now(timezone.utc) > datetime.strptime(
+        valid_until, "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=timezone.utc):
+        return "expired"
+    return "active"
+
+
+def _charter_attributes(agent: Agent) -> dict:
+    """
+    Lean, decision-shaped projection of an agent's charter — its *declared*
+    context (`capabilities` + `intent`) plus freshness/status.
+
+    Serving, not deciding. Fails closed: a revoked or expired charter reports
+    `status` != "active" **and** empty `capabilities`, so a consuming policy
+    denies whether it gates on status or on capabilities.
+    """
+    vc = agent.get_charter_vc()
+    subject = vc.get("credentialSubject", {})
+    valid_until = vc.get("validUntil")
+    status = _agent_status(agent)
+
+    return {
+        "subject": agent.did,
+        "agent_id": agent.agent_id,
+        "issuer": _registry_did,
+        "status": status,
+        "capabilities": subject.get("capabilities", []) if status == "active" else [],
+        "intent": subject.get("intent"),
+        "scope": subject.get("scope"),
+        "validFrom": vc.get("validFrom"),
+        "validUntil": valid_until,
+        "revokedAt": agent.revoked_at.isoformat() if agent.revoked_at else None,
+    }
+
+
+@app.get(
+    "/agents/{agent_id}/attributes",
+    summary="Charter decision attributes (by agent_id)",
+    tags=["Agents"],
+)
+def get_agent_attributes(agent_id: str, session: SessionDep) -> dict:
+    """
+    Decision attributes for a policy engine / external attribute source (PIP),
+    keyed by `agent_id`. See `/resolve` to key by the full subject DID — the
+    natural fit when a token's `act.sub` carries the DID verbatim.
+    """
+    agent = session.exec(select(Agent).where(Agent.agent_id == agent_id)).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+    return _charter_attributes(agent)
+
+
+@app.get(
+    "/resolve",
+    summary="Resolve a subject DID to charter decision attributes",
+    tags=["Agents"],
+)
+def resolve_subject(subject: str, session: SessionDep) -> dict:
+    """
+    Decision attributes keyed by the full agent **DID** — so a policy engine can
+    pass a token's `act.sub` (the DID) verbatim, with no segment parsing.
+
+    The DID is the foreign key everything maps through: `act.sub` in the token, a
+    reversible store-encoding in the consumer's relationship store, and this
+    lookup in the registry. Validates the DID belongs to this registry.
+    """
+    agent_id = _agent_id_from_did(subject)
+    if not agent_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Subject {subject!r} is not an agent DID of this registry ({_registry_did}).",
+        )
+    agent = session.exec(select(Agent).where(Agent.agent_id == agent_id)).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+    return _charter_attributes(agent)
+
+
+# ── Presentation verification (agent-native, wallet-less) ─────────────────────
+
+@app.post(
+    "/verify",
+    summary="Verify a Verifiable Presentation (no wallet, no OID4VP round-trip)",
+    tags=["Verification"],
+)
+def verify_presentation(req: VerificationRequest, session: SessionDep) -> dict:
+    """
+    Verify an agent-presented charter directly — no wallet, no presentation-request
+    round-trip. The agent wraps its charter VC in a Verifiable Presentation signed
+    with its own key and sends it; this checks two signatures and current status:
+
+      1. holder signature on the VP, against the agent's *current* key
+         (a rotated-out or tampered key fails here)
+      2. registry signature on the embedded charter VC
+      3. current status (revoked / expired) of the holder
+
+    This is a **verification primitive**: it returns "cryptographically valid +
+    the claims + current status", not a permit/deny. The authorization decision
+    stays with the consumer.
+    """
+    vp = req.presentation
+    result: dict = {
+        "valid": False,
+        "holder": vp.get("holder", ""),
+        "holder_signature_valid": False,
+        "charter_signature_valid": False,
+        "status": None,
+        "claims": None,
+        "error": None,
+    }
+
+    holder_did = vp.get("holder")
+    if not holder_did:
+        result["error"] = "Presentation missing 'holder'."
+        return result
+    if req.challenge is not None and vp.get("challenge") != req.challenge:
+        result["error"] = "Challenge mismatch."
+        return result
+    vcs = vp.get("verifiableCredential") or []
+    if not vcs:
+        result["error"] = "Presentation contains no verifiableCredential."
+        return result
+
+    agent_id = _agent_id_from_did(holder_did)
+    agent = (
+        session.exec(select(Agent).where(Agent.agent_id == agent_id)).first()
+        if agent_id
+        else None
+    )
+    if not agent:
+        result["error"] = f"Unknown holder DID: {holder_did!r}"
+        return result
+
+    # 1. holder signature on the VP, against the agent's current key
+    result["holder_signature_valid"] = verify_document_proof(
+        vp, agent.get_public_key_jwk()
+    )
+    # 2. registry signature on the embedded charter VC
+    charter_vc = vcs[0]
+    result["charter_signature_valid"] = verify_document_proof(
+        charter_vc, _registry_public_key_jwk
+    )
+    # 3. current status (freshness / revocation)
+    result["status"] = _agent_status(agent)
+
+    if not result["holder_signature_valid"]:
+        result["error"] = "Holder signature invalid (wrong/rotated key, or tampered presentation)."
+    elif not result["charter_signature_valid"]:
+        result["error"] = "Charter signature invalid (not issued by this registry, or tampered)."
+    elif result["status"] != "active":
+        result["error"] = f"Holder charter is not active (status={result['status']})."
+    else:
+        result["valid"] = True
+        result["claims"] = charter_vc.get("credentialSubject", {})
+
+    return result
 
 
 # ── Key rotation ──────────────────────────────────────────────────────────────

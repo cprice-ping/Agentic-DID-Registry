@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -43,3 +45,17 @@ class KeyRotationResponse(BaseModel):
     did: str
     did_document: dict
     charter_vc: dict
+
+
+class VerificationRequest(BaseModel):
+    presentation: dict = Field(
+        ...,
+        description=(
+            "A Verifiable Presentation: the charter VC wrapped and signed by the "
+            "agent's own key (no wallet, no OID4VP request flow)."
+        ),
+    )
+    challenge: Optional[str] = Field(
+        default=None,
+        description="If provided, must match the presentation's 'challenge' (replay protection).",
+    )

@@ -78,5 +78,20 @@ pattern:
   consumer* for the credential-model, kept for the demo and tests. Consumption
   wearing an issuer's clothes; its canonical home is the consuming agent.
 
+## Verification primitives are allowed; deciding is not
+
+The repo serves two wallet-less verification *primitives* — `POST /verify` (check
+a presentation's two signatures + status) and `GET /resolve` / `/attributes`
+(resolve declared context + status). These are **not** on the wrong side of the
+line: they return validity / claims / attributes, never permit/deny. They live at
+the issuer only because it already holds every key and DID document needed, and
+they stay substrate-neutral (no SpiceDB, no P1AZ shape). The authorization
+decision — `grant ∩ declared ∩ policy` — remains entirely the consumer's.
+
+The test is simple: a primitive that answers *"is this cryptographically valid,
+and what does it say?"* is serving; anything that answers *"may this proceed?"* is
+deciding, and deciding belongs to the consumer.
+
 If a proposed change makes this repo smarter about *deciding* or *presenting*
-rather than *issuing*, it is on the wrong side of the line.
+(driving a wallet/OID4VP presentation round-trip) rather than *issuing* or
+*serving a verification primitive*, it is on the wrong side of the line.

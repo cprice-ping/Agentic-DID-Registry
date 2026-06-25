@@ -26,6 +26,8 @@ from typing import Optional
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from app.config import REGISTRY_BASE_URL
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -94,7 +96,7 @@ def issue_vc_jwt(
     vc: dict = {
         "@context": [
             "https://www.w3.org/ns/credentials/v2",
-            "https://cpricedomain.net/contexts/agent-charter/v1",
+            f"{REGISTRY_BASE_URL}/contexts/agent-charter/v1",
         ],
         "type": ["VerifiableCredential", "AgentCharterCredential"],
         "credentialSubject": credential_subject,
@@ -172,7 +174,7 @@ def issue_sd_jwt_vc(
         "sub": agent_did,
         "iat": now,
         # vct identifies the credential type — must be a URI per SD-JWT-VC spec
-        "vct": "https://cpricedomain.net/credentials/AgentCharterCredential",
+        "vct": f"{REGISTRY_BASE_URL}/credentials/AgentCharterCredential",
         "_sd_alg": "sha-256",
         "_sd": sorted(sd_digests),  # sorted for deterministic serialisation
     }

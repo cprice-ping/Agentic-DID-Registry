@@ -195,6 +195,12 @@ class TestAgentRegistration:
         assert subject["capabilities"] == ["observe", "publish"]
         assert "proof" in vc
 
+    def test_charter_context_uses_registry_domain(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        vc = register(client, "ctxtest", pub_jwk, sample_charter).json()["charter_vc"]
+        assert "https://test.example.com/contexts/agent-charter/v1" in vc["@context"]
+        assert all("cpricedomain.net" not in c for c in vc["@context"])
+
     def test_charter_has_validity_and_status(self, client, sample_charter, agent_keypair):
         pub_jwk, _ = agent_keypair
         vc = register(client, "napaexpiry", pub_jwk, sample_charter).json()["charter_vc"]
@@ -361,8 +367,192 @@ class TestCharterRetrieval:
         )
         assert verify_document_proof(vc, pub_key_jwk), "Charter VC signature is invalid"
 
+    def test_ldp_vc_proofvalue_is_base58btc(self, client):
+        """eddsa-jcs-2022 mandates multibase base58btc ('z'), not base64url ('u')."""
+        vc = client.get("/agents/chartertest/charter").json()
+        assert vc["proof"]["proofValue"].startswith("z")
+
+    def test_ldp_vc_proof_is_spec_shaped(self, client):
+        """
+        Independently reconstruct the eddsa-jcs-2022 hash and verify the signature
+        — proving the wire format matches the spec (base58btc proofValue + the
+        document @context folded into the proofConfig), not just self-consistency.
+        """
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        from app.crypto import b58btc_decode, jcs
+
+        vc = client.get("/agents/chartertest/charter").json()
+        registry_doc = client.get("/.well-known/did.json").json()
+        vm_id = vc["proof"]["verificationMethod"]
+        pub_x = next(
+            vm["publicKeyJwk"]["x"]
+            for vm in registry_doc["verificationMethod"]
+            if vm["id"] == vm_id
+        )
+
+        def _dec(s):
+            pad = 4 - len(s) % 4
+            return base64.urlsafe_b64decode(s + ("=" * pad if pad != 4 else ""))
+
+        pub = Ed25519PublicKey.from_public_bytes(_dec(pub_x))
+        signature = b58btc_decode(vc["proof"]["proofValue"][1:])  # strip 'z'
+
+        proof_options = {k: v for k, v in vc["proof"].items() if k != "proofValue"}
+        doc = {k: v for k, v in vc.items() if k != "proof"}
+        proof_config = {"@context": doc["@context"], **proof_options}
+        hash_data = (
+            hashlib.sha256(jcs(proof_config)).digest()
+            + hashlib.sha256(jcs(doc)).digest()
+        )
+        pub.verify(signature, hash_data)  # raises InvalidSignature if wrong
+
     def test_unknown_agent_returns_404(self, client):
         assert client.get("/agents/nobody/charter").status_code == 404
+
+
+# ── Charter decision attributes (PIP projection) ──────────────────────────────
+
+class TestCharterAttributes:
+    @pytest.fixture(autouse=True)
+    def register(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        register(client, "attrtest", pub_jwk, sample_charter)
+
+    def test_attributes_returns_declared_context(self, client):
+        a = client.get("/agents/attrtest/attributes").json()
+        assert a["subject"] == "did:web:test.example.com:agents:attrtest"
+        assert a["agent_id"] == "attrtest"
+        assert a["issuer"] == "did:web:test.example.com"
+        assert a["status"] == "active"
+        assert a["capabilities"] == ["observe", "publish"]
+        assert a["intent"]  # declared intent present
+        assert "validUntil" in a
+
+    def test_unknown_agent_returns_404(self, client):
+        assert client.get("/agents/nobody/attributes").status_code == 404
+
+    def test_resolve_by_did_returns_same_attributes(self, client):
+        did = "did:web:test.example.com:agents:attrtest"
+        by_id = client.get("/agents/attrtest/attributes").json()
+        by_did = client.get("/resolve", params={"subject": did}).json()
+        assert by_did == by_id
+        assert by_did["subject"] == did
+        assert by_did["capabilities"] == ["observe", "publish"]
+
+    def test_resolve_foreign_did_rejected(self, client):
+        resp = client.get(
+            "/resolve", params={"subject": "did:web:other.example.com:agents:attrtest"}
+        )
+        assert resp.status_code == 400
+
+    def test_resolve_unknown_agent_404(self, client):
+        resp = client.get(
+            "/resolve", params={"subject": "did:web:test.example.com:agents:ghost"}
+        )
+        assert resp.status_code == 404
+
+    def test_revoked_agent_fails_closed(self, client, sample_charter, agent_keypair):
+        pub_jwk, _ = agent_keypair
+        register(client, "attrrevoke", pub_jwk, sample_charter)
+        voucher = make_voucher("attrrevoke", purpose="revoke")
+        client.delete(
+            "/agents/attrrevoke", headers={"Authorization": f"Bearer {voucher}"}
+        )
+        # 200 (not 410) with an explicit status + empty capabilities → policy denies
+        resp = client.get("/agents/attrrevoke/attributes")
+        assert resp.status_code == 200
+        a = resp.json()
+        assert a["status"] == "revoked"
+        assert a["capabilities"] == []
+        assert a["revokedAt"] is not None
+
+
+# ── Presentation verification (POST /verify, wallet-less) ─────────────────────
+
+class TestPresentationVerification:
+    @pytest.fixture()
+    def presented(self, client, sample_charter):
+        """Register an agent and return a make_vp() that signs a VP with its key."""
+        from app.crypto import generate_ed25519_keypair, sign_document
+        priv, jwk = generate_ed25519_keypair()
+        aid = f"verify{uuid.uuid4().hex[:8]}"
+        data = register(client, aid, jwk, sample_charter).json()
+        did, charter_vc = data["did"], data["charter_vc"]
+
+        def make_vp(challenge=None):
+            vp = {
+                "@context": ["https://www.w3.org/ns/credentials/v2"],
+                "type": ["VerifiablePresentation"],
+                "holder": did,
+                "verifiableCredential": [charter_vc],
+            }
+            if challenge:
+                vp["challenge"] = challenge
+            return sign_document(vp, priv, f"{did}#key-1", proof_purpose="authentication")
+
+        return aid, did, priv, charter_vc, make_vp
+
+    def test_valid_presentation(self, client, presented):
+        _, did, _, _, make_vp = presented
+        r = client.post("/verify", json={"presentation": make_vp()}).json()
+        assert r["valid"] is True
+        assert r["holder_signature_valid"] and r["charter_signature_valid"]
+        assert r["status"] == "active"
+        assert r["holder"] == did
+        assert r["claims"]["capabilities"] == ["observe", "publish"]
+
+    def test_challenge_enforced(self, client, presented):
+        *_, make_vp = presented
+        vp = make_vp(challenge="nonce-1")
+        ok = client.post("/verify", json={"presentation": vp, "challenge": "nonce-1"}).json()
+        assert ok["valid"] is True
+        bad = client.post("/verify", json={"presentation": vp, "challenge": "nonce-2"}).json()
+        assert bad["valid"] is False
+        assert "Challenge" in bad["error"]
+
+    def test_tampered_presentation_rejected(self, client, presented):
+        *_, make_vp = presented
+        tampered = {**make_vp(), "holder": "did:web:test.example.com:agents:impostor"}
+        r = client.post("/verify", json={"presentation": tampered}).json()
+        assert r["valid"] is False
+        # holder swapped to an unknown agent → caught as unknown holder
+        assert "Unknown holder" in r["error"]
+
+    def test_tampered_credential_rejected(self, client, presented):
+        """Mutating the VP body after signing invalidates the holder signature."""
+        from app.crypto import generate_ed25519_keypair
+        _, did, priv, charter_vc, make_vp = presented
+        vp = make_vp()
+        vp["verifiableCredential"][0]["credentialSubject"]["capabilities"] = ["admin"]
+        r = client.post("/verify", json={"presentation": vp}).json()
+        assert r["valid"] is False
+        assert r["holder_signature_valid"] is False
+
+    def test_unknown_holder(self, client):
+        from app.crypto import generate_ed25519_keypair, sign_document
+        priv, _ = generate_ed25519_keypair()
+        did = "did:web:test.example.com:agents:ghostagent"
+        vp = sign_document(
+            {"@context": ["https://www.w3.org/ns/credentials/v2"],
+             "type": ["VerifiablePresentation"], "holder": did,
+             "verifiableCredential": [{"x": 1}]},
+            priv, f"{did}#key-1", proof_purpose="authentication",
+        )
+        r = client.post("/verify", json={"presentation": vp}).json()
+        assert r["valid"] is False
+        assert "Unknown holder" in r["error"]
+
+    def test_revoked_holder_fails_closed_but_sigs_still_valid(self, client, presented):
+        aid, did, _, _, make_vp = presented
+        vp = make_vp()
+        voucher = make_voucher(aid, purpose="revoke")
+        client.delete(f"/agents/{aid}", headers={"Authorization": f"Bearer {voucher}"})
+        r = client.post("/verify", json={"presentation": vp}).json()
+        assert r["valid"] is False
+        assert r["status"] == "revoked"
+        # the signatures themselves remain cryptographically valid
+        assert r["holder_signature_valid"] is True
+        assert r["charter_signature_valid"] is True
 
 
 # ── Bitstring Status List ─────────────────────────────────────────────────────
@@ -533,6 +723,18 @@ class TestCrypto:
         _, other_pub_jwk = generate_ed25519_keypair()
         signed = sign_document({"hello": "world"}, private_key, "did:web:test#key-1")
         assert not verify_document_proof(signed, other_pub_jwk)
+
+    def test_base58btc_roundtrip(self):
+        import os
+        from app.crypto import b58btc_encode, b58btc_decode
+        for data in (b"", b"\x00", b"\x00\x00\x01\x02", os.urandom(64)):
+            assert b58btc_decode(b58btc_encode(data)) == data
+
+    def test_signed_doc_uses_z_multibase(self):
+        from app.crypto import generate_ed25519_keypair, sign_document
+        priv, _ = generate_ed25519_keypair()
+        signed = sign_document({"@context": ["x"], "a": 1}, priv, "did:web:test#key-1")
+        assert signed["proof"]["proofValue"].startswith("z")
 
 
 # ── Voucher unit tests ────────────────────────────────────────────────────────
