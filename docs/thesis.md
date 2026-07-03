@@ -1,210 +1,249 @@
-# What this is for — the thesis
+# What this is for
 
-> North-star document. The README says *what* this repo does and refuses to do;
-> this says *why*, and where it sits in a field that — as of 2026 — is converging
-> on the same ideas from several directions. Read [scope-and-boundaries.md](scope-and-boundaries.md)
-> for the issuance/consumption line this thesis assumes.
+The README covers what the repo does. This covers why, and how it relates to work
+happening elsewhere in 2026. See [scope-and-boundaries.md](scope-and-boundaries.md)
+for the issuance/consumption split it assumes.
 
-## The one sentence
+## Purpose
 
-The neutral **origin** of portable, self-owned agent identity that personal and
-custom agents both carry and that **no consuming system owns** — so we don't
-repeat, for agents, the mistake we made giving IdPs ownership of human identity.
+A neutral origin for portable, self-owned agent identity. Personal and custom
+agents both carry it, and no consuming system owns it. The point is to avoid
+repeating, for agents, the mistake we made when we let IdPs own human identity.
 
 ## The mistake we're not repeating
 
-Human identity got captured by IdPs ("log in with Google") for a *structural*
-reason: humans can't hold their own keys or manage their own identity, so we
-handed it to an IdP, which then owned it. The identifier ate the identity.
+Human identity ended up owned by IdPs ("log in with Google") for a practical
+reason: people can't hold their own keys or manage their own identity, so we
+handed that job to an IdP, and the IdP became the owner. The identifier became the
+identity.
 
-Agents don't have that limitation. They hold their own keys. So the reason for
-the capture **doesn't apply** — repeating it for agents is a choice, not an
-inheritance, and a bad one. This is the twin of the project's founding line —
-*"a wallet exists because humans can't sign; agents can."* That was the **custody**
-corollary. This is the **ownership** corollary. Same root (agents hold keys), two
-consequences: no wallet, and no IdP-owner.
+Agents don't have that limitation. They hold their own keys, so the reason the
+capture happened doesn't apply to them. Repeating it would be a choice, not a
+necessity. This is the point the project started from ("a wallet exists because
+humans can't sign; agents can"), applied to ownership instead of custody: one
+cause (agents hold their own keys), two results (no wallet, no IdP owner).
 
 ## Identity vs. identifier
 
-- **Identity** — durable, portable, self-owned (the agent holds its keys),
-  vouched by a neutral origin, travels across every context. Owned by the
-  agent/principal.
-- **Identifier** — a local handle a system assigns to *reference* an identity in
-  its own namespace, to hang state and decisions on. Owned by the system,
-  disposable.
+Identity is durable, portable, and self-owned. The agent holds its keys, a neutral
+origin vouches for it, and it travels across contexts. It belongs to the agent.
 
-**The rule: identifier → identity.** Systems mint identifiers freely (a SpiceDB
-object id, a `sub_hash`, a database row). The moment a system's identifier *is*
-the identity, the capture is back.
+An identifier is a local handle a system assigns to reference an identity in its
+own namespace, so it can hang state and decisions off it. It belongs to the
+system and is disposable.
+
+The rule is that an identifier points at an identity. Systems mint identifiers
+freely: a SpiceDB object id, a `sub_hash`, a database row. The trouble starts when
+a system's identifier becomes the identity, because then the capture is back.
 
 ## Identity is acquired on need, not at birth
 
 "Birthright identity" is the wrong frame. There are three moments:
 
-- **Keypair — at birth.** Self-minted, no authority, free. The only true
-  birthright. The agent can always say "I am this key" and prove it — but that's
-  an identifier asserting itself, bytes, not trust.
-- **Vouch / charter — when provisioning for a purpose.** Lazy relative to birth.
-- **Trust — at first contact.** The relying party's call, made in the moment.
+- A keypair, at birth. Self-minted, free, no authority required. It's the only
+  real birthright, but it's just an identifier asserting itself: bytes, not trust.
+- A vouch or charter, when the agent is provisioned for a purpose. Later than birth.
+- Trust, at first contact. The relying party decides in the moment.
 
-The registry lives at the **vouch** layer, invoked around contact — not at birth.
-Because identity is created only at the moment of a consumption event, it is
-**demand-pulled**: you cannot mint it into a void. (That is the structural answer
-to the issue-into-a-void / adoption-graveyard risk.)
+The registry sits at the vouch layer, not at birth. Identity is created only when
+something is about to consume it, which means it is demand-pulled and can't be
+minted into a void. That is also the answer to the adoption-graveyard risk.
 
-**Agents should get identity the way servers do, not the way captured humans do.**
-A server self-asserts a name + key; trust is conferred contextually — by a CA *and*
-by the client choosing to connect, at connect time. Lazy, presented, relying-party
-decided. The birthright/IdP model is the captured-human model: eager, owned, binary.
+Agents should get identity the way servers do, not the way captured humans do. A
+server asserts a name and a key, and trust is conferred in context: by a CA, and
+by the client choosing to connect, at connect time. The birthright/IdP model is
+the human-capture model, which is eager, owned, and binary.
 
-### The interaction shape
+### The interaction
 
 ```
-introduce   → identifier + proof of key control   (the shared primitive)
-[vouch]     → charter, IF the relying party wants more than TOFU
+introduce   → identifier + proof of key control
+[vouch]     → charter, if the relying party wants more than TOFU
 request     → carries intent (why this action, now)
-decide      → graduated, relying-party-owned:
-              anonymous / pin (TOFU) / demand-vouch / issue-credential / deny
+decide      → relying party's call:
+              anonymous / pin (TOFU) / demand vouch / issue credential / deny
 ```
 
-The amount of identity required is itself a function of the ask. That graduated,
-consumer-owned response is richer than binary authenticated/not — and it is the
-correct locus of authority (the consumer decides, the IdP doesn't decide for it).
+How much identity is required depends on what's being asked, and the relying party
+makes that call. That is more useful than a binary authenticated-or-not, and it
+puts the decision where it belongs.
 
-The honest limit: first contact has no prior trust, so it bottoms out at **TOFU
-or a pre-existing vouch**. The vouch is eager relative to contact, lazy relative
-to birth. The registry doesn't vanish; it relocates from birth to need.
+One limit worth stating plainly: first contact has no prior trust, so it comes
+down to either TOFU or a pre-existing vouch. The vouch is early relative to
+contact and late relative to birth. The registry doesn't disappear; it moves from
+birth to need.
 
-## Personal and custom agents, reconciled
+## Personal and custom agents
 
-They differ in exactly **one** place — *who vouches at enrollment*:
+They differ in one place: who vouches at enrollment.
 
-- **Personal agent** (e.g. a roaming assistant): vouched by its person — the human
-  attests "this is my agent" (`sub`=human, the delegation).
-- **Custom agent** (e.g. a deployed workload): vouched by its operator.
+- A personal agent (a roaming assistant, say) is vouched by its person. The human
+  attests that this is their agent (`sub`=human, the delegation).
+- A custom agent (a deployed workload) is vouched by its operator.
 
-After that they are identical: each carries a portable identity + charter; each
-system it enters mints a local identifier bound to that identity and hangs its own
-decisions there. The reconciliation seam already exists in code — the voucher's
-**pluggable trusted-issuer set** (`app/voucher.py`) is where the second signer
-plugs in. Person-vouched and operator-vouched go through the same endpoint with a
-different signer.
+After that they behave the same. Each carries a portable identity and charter, and
+each system it enters mints a local identifier bound to that identity. The code
+already supports both: the voucher's pluggable trusted-issuer set
+(`app/voucher.py`) is where the second signer plugs in. Person-vouched and
+operator-vouched enrollments use the same endpoint with a different signer.
 
-## Consumption is projection into the substrate
+## Consumption is projection
 
-The identity is self-owned upstream; at each consumption edge it is **projected**
-into whatever that substrate requires:
+Identity is self-owned upstream. At each consumption edge it is projected into
+whatever that substrate needs:
 
-- resource server → an **OAuth bearer**, via token exchange (`act.sub` carries the
-  durable identity; the bearer is the disposable local projection)
-- ATProto / Watershed → a native record/handle construct
-- a peer agent → a presented VP
+- a resource server takes an OAuth bearer, via token exchange (`act.sub` carries
+  the durable identity; the bearer is the disposable local projection)
+- ATProto/Watershed takes a native record or handle
+- a peer agent takes a presented VP
 
-Projection is not a defeat and not a transfer of ownership — it is the
-identifier→identity rule applied to *credentials*. The one consumption primitive
-that is genuinely shared and necessary across every substrate is **proof of
-control** (`present()` / `verify()`): how a self-owned identity becomes a system's
-trustable local identifier without the system owning it.
+Projection isn't a defeat or a transfer of ownership. It is the
+identifier-points-at-identity rule applied to credentials. The one primitive
+shared across every substrate is proof of control (`present()` / `verify()`): it
+is how a self-owned identity becomes a system's trustable local identifier without
+the system owning it.
 
-## Where this sits in 2026 (related work — link, don't reinvent)
+## Two-sided authority
 
-The field is converging on these ideas from several directions. This repo should
-**map onto** these, not duplicate their primitives. Its durable value is the
-synthesis above plus the consumption adapters — not a bespoke issuer.
+A delegated token has two subjects: `sub` (the human) and `act` (the agent). It is
+a join of two independently-sourced identities, so it needs an authority on each
+side, not one. This is why an agent-charter registry sits alongside a human
+identity/relationship store rather than inside it.
 
-- **Open Agent Passport (OAP)** — DID-based identity + declarative
+The two sides are not symmetric. They differ in kind, which is why one registry
+can't serve both:
+
+| | `sub` side (human) | `act` side (agent) |
+|---|---|---|
+| Enrollment | account, IdP-managed | self-owned DID, voucher-enrolled |
+| Keys | held by an IdP | held by the agent |
+| Authority | entitlements / relationships (ReBAC) | a declared charter (a ceiling) |
+| Maturity | solved (e.g. PingOne + SpiceDB) | the new part (this registry) |
+
+Force the agent onto the human side, as an entity row keyed by a `sub_hash`, and
+you lose what makes agent identity work: portability, self-ownership, an
+identifier that only points. You wouldn't put humans on the agent side either,
+since they already have accounts and can't hold keys. Each side has its own nature
+and its own registry.
+
+The token exchange is where the two meet, which is why RFC 8693 is the right
+primitive: it exists to join tokens from different domains. `sub`/`act` is not
+only delegation notation; it is the seam between the human-identity world and the
+agent-identity world.
+
+Both registries bracket the token. They are consulted going in, to scope the mint
+(the agent presents its charter, the human presents an IdP token), and coming out,
+at enforcement (the PDP reads the charter via `/resolve` and the human's grants
+from the ReBAC store).
+
+```
+  act (agent) side              join               sub (human) side
+  this registry:            token exchange         IdP + ReBAC store:
+  DID + charter        ──►    (RFC 8693)    ◄──    identity + grants + delegation
+                                  │
+                                  ▼
+                       PDP: intersect both sides, per request
+```
+
+Nothing in the middle is new. The registry supplies the agent side, the human side
+is a solved system you already run, and the PDP intersects them. What's left is
+modeling the delegation in the ReBAC store and writing the intersection policy.
+
+## Where this sits in 2026
+
+The same ideas are being worked on from several directions. The repo should map
+onto that work rather than duplicate it; its value is the synthesis and the
+consumption adapters, not a bespoke issuer.
+
+- **Open Agent Passport (OAP)** — DID-based identity plus declarative
   capabilities/limits, issuer-signed, layered on MCP/A2A/VC. Closest to this whole
   thesis. <https://cubitrek.com/blog/agent-passport>
 - **AGNTCY Agent Identity** (Cisco/Outshift, "Internet of Agents") — DID-bound
-  agent ID + provenance + attachable VCs.
+  agent ID plus provenance and attachable VCs.
   <https://outshift.cisco.com/blog/ai-agent-identity-framework-agntcy> ·
   <https://docs.agntcy.org/identity/credentials/>
 - **IETF `draft-oauth-transaction-tokens-for-agents`** — OAuth transaction tokens
-  with `actor`/`principal` for agent context across service boundaries. The
-  *correct* form of the OAuth-edge projection above; adopt rather than hand-build.
+  with `actor`/`principal` for agent context across service boundaries. The right
+  form of the OAuth-edge projection above; adopt rather than hand-build.
   <https://datatracker.ietf.org/doc/html/draft-oauth-transaction-tokens-for-agents-04>
-- **A2A + DIF presentation exchange** — VC exchange built into agent-to-agent;
-  the lazy present-and-decide pattern as a wire protocol.
+- **A2A + DIF presentation exchange** — VC exchange built into agent-to-agent; the
+  present-and-decide pattern as a wire protocol.
 - **WIMSE / AIMS / SPIFFE-for-agents** — the workload/custom-agent side, and the
-  named gap this charter fills: *SPIFFE says "this workload is X"; it cannot say
-  "X, acting for Y, with limited scope, for bounded time, with audit."*
+  gap this charter fills: SPIFFE says "this workload is X" but not "X, acting for
+  Y, with limited scope, for bounded time, with audit."
   <https://stacklok.com/blog/agentic-identity-explained-how-to-apply-spiffe-and-relationship-based-authorization-to-ai-agents-in-2026/>
-- **UCAN** — capability/attenuation/delegation; note known weaknesses (DID
-  complexity, nested-JWT token bloat) before adopting.
+- **UCAN** — capability, attenuation, and delegation; note the known weaknesses
+  (DID complexity, nested-JWT token bloat) before adopting.
 - **Delegation-chain splicing** (2026 OAuth WG) — independent confirmation that an
-  agent's slice needs *independent* bounding (bind subject + actor tokens to the
-  same request).
-- **MCP 2026-07-28 authorization** — OAuth 2.1 + RFC 9728/9207; the bearer edge is
-  the mandated interop substrate, which is why projection (not replacement) is the
-  game. <https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization>
-- **DIF — "Authorising Autonomous Agents at Scale."**
+  agent's slice needs its own bounding (bind subject and actor tokens to the same
+  request).
+- **MCP 2026-07-28 authorization** — OAuth 2.1 plus RFC 9728/9207; the bearer edge
+  is the mandated interop substrate, which is why projection, not replacement, is
+  the game. <https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization>
+- **DIF, "Authorising Autonomous Agents at Scale."**
   <https://blog.identity.foundation/building-ai-trust-at-scale-4/>
 
-## Applicability — when any of this is load-bearing (the collapse line)
+## When any of this is load-bearing
 
-Agent identity is not always needed. The cheapest way to secure a boundary is to
-delete it, and a large class of agent interaction deletes it. There are two
-governance regimes, and most of this document only applies to the second.
+Agent identity isn't always needed. The cheapest way to secure a boundary is to
+remove it, and a lot of agent interaction does exactly that. There are two
+regimes, and most of this document applies only to the second.
 
-- **Regime A — visibility + confirmation.** The agent shares the human's live
-  session and view: in-page, same-origin, synchronous (e.g. a W3C WebMCP tool
-  invoked in the user's authenticated browser session). Governed by *watching*
-  (a live tool console) and *confirming* (elicitation / step-up). There is **no
-  agent-distinct principal** — the action authorizes from `sub` (the user) +
-  `client_id` (the channel/app) + request context. Reference:
-  `WebMCP-Demo-Retail`.
-- **Regime B — identity + policy.** The agent acts where it can't be watched:
-  server-side, asynchronous, cross-service, or agent-to-agent. Governed by *who
-  it is* and *what it is chartered for*. Reference: Notflux + this registry.
+Regime A is visibility plus confirmation. The agent shares the human's live
+session and view: in-page, same-origin, synchronous, like a WebMCP tool called in
+the user's authenticated browser session. It is governed by watching (a live tool
+console) and confirming (elicitation or step-up). There is no agent-distinct
+principal; the action authorizes from `sub` (the user), `client_id` (the app), and
+request context. Reference: `WebMCP-Demo-Retail`.
 
-The dividing line is observable: **can the human see and confirm the action, or
-not.** Not autonomy — *session co-presence*.
+Regime B is identity plus policy. The agent acts where it can't be watched:
+server-side, asynchronous, cross-service, or agent-to-agent. It is governed by who
+it is and what it is chartered for. Reference: Notflux plus this registry.
 
-Three clarifications that keep the line honest:
+The line between them is whether the human can see and confirm the action. It is
+about session co-presence, not autonomy.
 
-- **WebMCP does not *solve* agent identity; it *dissolves the need* for it** in
-  Regime A. There is simply no agent-distinct principal to identify.
-- **`client_id` proves channel, not actor** — which app, not which agent.
-  Adequate only while the page is a trusted single-agent environment; it cannot
-  distinguish a trusted assistant from a prompt-injected or third-party agent
-  sharing the same session.
-- **The PDP is invariant across the line.** The same policy decision (e.g.
-  PingOne Authorize) runs in both regimes; only the *subject richness* changes —
-  `(user, channel)` in A, `(user, agent, delegation, charter)` in B. Agent
-  identity is **additional, minimal inputs to the same decision**, supplied only
-  when the session can't carry them — not a separate edifice.
+Three things keep the line honest:
 
-The collapse cannot reach four cases, which is where Regime B is forced:
+- WebMCP doesn't solve agent identity; it removes the need for it in Regime A.
+  There is no agent-distinct principal to identify.
+- `client_id` proves the channel, not the actor: which app, not which agent. That
+  holds while the page is a trusted single-agent environment, but it can't tell a
+  real assistant from a prompt-injected or third-party agent in the same session.
+- The PDP is the same across the line. The same decision (PingOne Authorize, say)
+  runs in both regimes; only the subject richness changes, from `(user, channel)`
+  in A to `(user, agent, delegation, charter)` in B. Agent identity is extra input
+  to the same decision, added when the session can't carry it, not a separate
+  system.
 
-1. **Cross-service fan-out** — the second hop; session/token audience doesn't transfer.
-2. **Async / detached** — no live session to ride.
-3. **Server-side / headless** — no browser session to inhabit.
-4. **Agent-to-agent** — no human session threads through.
+Four cases the collapse can't reach, where Regime B is forced:
 
-(Plus high-consequence **attribution** even in-session: needing "the human's
-*agent* did this," not "the human did this," for audit/liability.)
+1. Cross-service fan-out: the second hop, where the session/token audience doesn't
+   transfer.
+2. Async or detached work: no live session to ride.
+3. Server-side or headless agents: no browser session to inhabit.
+4. Agent-to-agent: no human session runs through it.
 
-HITL and on-behalf-of don't pick a regime — they get cheap in A and require the
-apparatus in B:
+Plus attribution for high-consequence actions even in-session, when you need "the
+human's agent did this" rather than "the human did this," for audit or liability.
 
-- **Regime A:** on-behalf-of is implicit (the agent *is* the session); HITL is
-  inline (elicitation). No apparatus.
-- **Regime B:** on-behalf-of must be encoded in a credential (`sub`/`act`, a
-  transaction token); HITL becomes out-of-band approval (CIBA / push) layered on
-  agent identity. Apparatus + step-up.
+HITL and on-behalf-of don't belong to one regime; they are cheap in A and need the
+apparatus in B. In Regime A, on-behalf-of is implicit (the agent is the session)
+and HITL is inline (elicitation). In Regime B, on-behalf-of has to be encoded in a
+credential (`sub`/`act`, a transaction token), and HITL becomes out-of-band
+approval (CIBA or push) on top of agent identity.
 
-**Design rule:** design from the *decision* and the *oversight* backward. Let
-boundaries collapse where they can (Regime A); provision identity *minimally and
-on-need* only for the residue (Regime B). The market routing around identity
-ceremony (WebMCP) is a **filter** that tells you where identity is actually
-load-bearing — not a threat to it.
+Design from the decision and the oversight backward. Let boundaries collapse where
+they can (Regime A), and provision identity minimally and on-need only for the
+rest (Regime B). WebMCP routing around identity isn't a threat; it is a filter that
+shows where identity is actually load-bearing.
 
-## Honest calibration
+## Calibration
 
-Not foolish — **early, and deliberately built to fail cheap if it is.** The
-conception is the correct application of "agents can hold their own keys" to
-identity *ownership*. The risk is purely timing and a crowded, unconverged field.
-The lazy/need-based model *is* the hedge: no inventory minted, manufactured on
-demand, so being early costs ~nothing. The failure mode to avoid is reinventing
-primitives that are being standardized; the durable contribution is the synthesis
-and the closed-loop demos that prove it against real consumers you own.
+The idea is early, and built to fail cheap if it turns out to be too early. It is
+the correct application of "agents can hold their own keys" to ownership. The risk
+is timing and a crowded, unsettled field. The on-need model is the hedge: nothing
+is minted in advance, so being early costs little. The failure mode to avoid is
+rebuilding primitives that are being standardized. The durable part is the
+synthesis and the closed-loop demos that prove it against consumers you actually
+run.
