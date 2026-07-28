@@ -149,6 +149,68 @@ Nothing in the middle is new. The registry supplies the agent side, the human si
 is a solved system you already run, and the PDP intersects them. What's left is
 modeling the delegation in the ReBAC store and writing the intersection policy.
 
+## Why not just plain JWTs?
+
+The comparison worth making is against RFC 8693 token exchange with `subject_token`
+and `actor_token`, because that is the incumbent, it is deployed, and it works. If
+this project can't say precisely what it adds, it is only machinery. Inside a
+single trust domain it adds nothing: when one IdP issues or federates both sides
+and mints the result, a DID is a second trust root and an extra resolution step for
+a problem that domain doesn't have. The four cases in
+[When any of this is load-bearing](#when-any-of-this-is-load-bearing) are where the
+comparison starts to matter.
+
+Three things get claimed for credentials that don't survive the detail:
+
+- **"The credential is self-describing; a JWT needs pre-configuration."** A JWT
+  carries `iss` in the body and `kid` in the header. Standard validation reads
+  `iss`, fetches `.well-known/openid-configuration`, takes `jwks_uri`, and
+  verifies. That is the same shape as resolving a `did:web` and checking the DID
+  document. Both use the token's own contents to find the key that validates the
+  token.
+- **"Any issuer can present it, and the verifier just checks the token."** Anyone
+  can mint a DID and sign a charter claiming `capabilities: [admin]`, and it will
+  verify perfectly: signature valid, key resolves, structure conformant.
+  Verification is self-contained; trust is not. A verifier that accepts any
+  well-formed credential is an open door with good cryptography on it. You still
+  need a policy naming the issuers you accept.
+- **"Granular decisions need credentials."** They need a policy engine.
+  `if this issuer and this agent and this capability, then this token shape` can be
+  written against plain JWT claims by any PDP.
+
+### What is actually different
+
+The issuer moves from a gate to a term. In token exchange as deployed,
+trusted-issuer is a binary precondition at the token endpoint: pass it, and the
+claims inside are taken at face value. In the credential model the issuer is one
+input among several to a single decision, weighed alongside the identifier and the
+capability. The trust question doesn't disappear; it becomes late-bound and
+unilateral, a line in a trust list rather than a federation integration, decided by
+the party carrying the risk at first contact. See
+[charter-mapping.md](charter-mapping.md) for the resulting mint rule
+(`azd ⊆ charter.can`).
+
+The assertion comes from a third party. Token exchange is structurally two-party:
+the verifier trusts the issuer, and the issuer vouches for the actor. The actor's
+attributes are therefore whatever that issuer chose to put in them, which means the
+IdP has to administer every agent it can say anything about. The agent's ceiling is
+something you configured. A charter is signed by someone who is not in the token
+path at all: the operator vouches, the registry signs, and the IdP can decide about
+an agent it never onboarded.
+
+The second point is the one that pays. With one operator it is a rounding error.
+With ten teams provisioning their own agents, the client-registration equivalent is
+ten onboarding processes and a directory you now own.
+
+### The bill
+
+The trust list is work that federation was doing for you. Someone has to curate it,
+and revocation becomes an explicit fetch (`/resolve`, the status list) rather than
+something that falls out of short token lifetimes. There is no widely-deployed
+trust framework for credential issuers, nothing playing the role OIDC federation
+plays. For one issuer you run yourself this is trivial. At ten issuers you don't
+control it is a governance problem, and federation may be the better answer.
+
 ## Where this sits in 2026
 
 The same ideas are being worked on from several directions. The repo should map
