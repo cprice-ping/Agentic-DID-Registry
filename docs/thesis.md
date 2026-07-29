@@ -149,18 +149,26 @@ Nothing in the middle is new. The registry supplies the agent side, the human si
 is a solved system you already run, and the PDP intersects them. What's left is
 modeling the delegation in the ReBAC store and writing the intersection policy.
 
-## Why not just plain JWTs?
+## Exchange or presentation
 
-The comparison worth making is against RFC 8693 token exchange with `subject_token`
-and `actor_token`, because that is the incumbent, it is deployed, and it works. If
-this project can't say precisely what it adds, it is only machinery. Inside a
-single trust domain it adds nothing: when one IdP issues or federates both sides
-and mints the result, a DID is a second trust root and an extra resolution step for
-a problem that domain doesn't have. The four cases in
+The question people arrive with is "why not just use plain JWTs?", and the
+comparison worth making is against RFC 8693 token exchange with `subject_token` and
+`actor_token`, because that is the incumbent, it is deployed, and it works. If this
+project can't say precisely what it adds, it is only machinery. Inside a single
+trust domain it adds nothing: when one IdP issues or federates both sides and mints
+the result, a DID is a second trust root and an extra resolution step for a problem
+that domain doesn't have. The four cases in
 [When any of this is load-bearing](#when-any-of-this-is-load-bearing) are where the
 comparison starts to matter.
 
-Three things get claimed for credentials that don't survive the detail:
+But the question is framed wrong, so discard the format first. Both sides are JWTs.
+A charter issues as `vc+jwt`, an `actor_token` is a JWT, both carry `iss`, both are
+signed, and both can be verified by anyone who can reach the key. Nothing here turns
+on the encoding. What differs is what the surrounding protocol requires be done with
+them.
+
+Three things get claimed for credentials that are really claims about something
+else:
 
 - **"The credential is self-describing; a JWT needs pre-configuration."** A JWT
   carries `iss` in the body and `kid` in the header. Standard validation reads
@@ -172,31 +180,56 @@ Three things get claimed for credentials that don't survive the detail:
   can mint a DID and sign a charter claiming `capabilities: [admin]`, and it will
   verify perfectly: signature valid, key resolves, structure conformant.
   Verification is self-contained; trust is not. A verifier that accepts any
-  well-formed credential is an open door with good cryptography on it. You still
-  need a policy naming the issuers you accept.
-- **"Granular decisions need credentials."** They need a policy engine.
-  `if this issuer and this agent and this capability, then this token shape` can be
-  written against plain JWT claims by any PDP.
+  well-formed credential is an open door with good cryptography on it.
+- **"Granular decisions need credentials."** They need a policy engine, and the
+  claims still in front of it. `if this issuer and this agent and this capability,
+  then this token shape` can be written against plain JWT claims by any PDP,
+  provided the PDP can still see them.
 
-### What is actually different
+That last clause is the whole argument.
 
-The issuer moves from a gate to a term. In token exchange as deployed,
-trusted-issuer is a binary precondition at the token endpoint: pass it, and the
-claims inside are taken at face value. In the credential model the issuer is one
-input among several to a single decision, weighed alongside the identifier and the
-capability. The trust question doesn't disappear; it becomes late-bound and
-unilateral, a line in a trust list rather than a federation integration, decided by
-the party carrying the risk at first contact. See
+### The actual axis
+
+In an exchange, an intermediary validates the issuer and mints a new token. That
+token is a decision, already taken; everything downstream inherits it and can only
+narrow. In a presentation, the credential arrives at the decision point intact, no
+decision has been taken yet, and every field in it is available as input.
+
+The trust check at an STS has four properties:
+
+| | |
+|---|---|
+| mandatory | no token without it |
+| prior | resolved before the request is known |
+| binary | pass or fail, no gradation |
+| remote | at the STS, not at the decision point |
+
+*Prior* is the one that costs you. The issuer term is bound and consumed before the
+claims exist as decision input, so a joint decision over issuer, claims, and context
+is never available: one of those variables was answered upstream, by something that
+did not know what would be asked. That is the same observation as saying the issuer
+is a gate rather than a term, seen from the other side. See
 [charter-mapping.md](charter-mapping.md) for the resulting mint rule
 (`azd ⊆ charter.can`).
 
-The assertion comes from a third party. Token exchange is structurally two-party:
-the verifier trusts the issuer, and the issuer vouches for the actor. Be careful
-what that does and doesn't imply. Federation already scales across agents perfectly
-well: trust a workload issuer once and every agent it vouches for is accepted, with
-no per-agent registration at the relying party. Per-agent administration exists in
-both models and sits upstream in both, as a service account, a SPIRE entry, or an
-enrollment voucher. Counting configurations is not the argument.
+Presentation defers the decision instead of front-loading it, and deferral is what
+buys the choice. It is not a property of VCs. Hand a raw JWT to a PDP as evidence
+rather than exchanging it and you get the same deferral. The ecosystems differ far
+more than the formats do: credential tooling assumes presentation, OAuth tooling
+assumes an STS.
+
+### What the charter adds on top
+
+Deferral is topology, and any format can have it. The charter contributes something
+separate: provenance.
+
+Token exchange is structurally two-party: the verifier trusts the issuer, and the
+issuer vouches for the actor. Be careful what that does and doesn't imply.
+Federation already scales across agents perfectly well: trust a workload issuer once
+and every agent it vouches for is accepted, with no per-agent registration at the
+relying party. Per-agent administration exists in both models and sits upstream in
+both, as a service account, a SPIRE entry, or an enrollment voucher. Counting
+configurations is not the argument.
 
 The difference is what the token carries. A federated workload token authenticates
 and stops: it says this is workload X at issuer Y, and says nothing about what X may
