@@ -166,6 +166,16 @@ Both are verification primitives, not decisions: they return validity, claims, o
 attributes, never permit/deny. The authorization decision stays with the consumer
 (see [Scope & boundary](#scope--boundary)).
 
+**Pin the key, not the DID.** `did:web` carries no cryptographic continuity between
+DID document versions, so whoever serves the document can point a name at a
+different key and a verifier resolving fresh cannot tell that from a legitimate
+rotation. Resolve once at first contact, keep the key, and treat a later key change
+as an event to decide about rather than follow. The DID stays useful as a handle for
+status and the charter. This is the recommended consumption pattern, not optional
+hardening: without it the registry has the same power over an agent that an IdP has
+over a person. See [thesis.md](docs/thesis.md#verifiers-should-pin-the-key-not-the-did)
+and [standards-watch.md](docs/standards-watch.md) for the `did:webvh` upgrade path.
+
 ### Enrollment auth — operator-signed vouchers
 
 Identity bootstrapping can't authenticate itself: an agent holds no registry

@@ -71,14 +71,41 @@ With `did:web` the identifier is a hosted location resolving to a document that
 contains the key. The identifier then survives key rotation, which is why
 `POST /agents/{id}/rotate` can exist at all, and revocation has somewhere to live.
 
-The price is that the durable identifier depends on a domain continuing to resolve.
-If the registry disappears, the agent still holds its key but its identifier is dead.
-So the key is the agent's own and the identifier is hosted, and "self-owned" should
-not be claimed for both.
+The price is paid twice. The obvious half is availability: the durable identifier
+depends on a domain continuing to resolve, so if the registry disappears the agent
+still holds its key but its identifier is dead.
 
-A verifier that wants none of that dependency can pin the key rather than the DID.
-After first contact the registry becomes advisory, which is the cheapest anti-capture
-measure available and costs nothing to offer.
+The half that matters more is that `did:web` has no cryptographic continuity. The
+registry serves the DID document, and the DID document declares which key controls
+the DID. Swap the key in that document and the identifier resolves to somebody else,
+while the original agent still holds a key that no longer corresponds to its own
+name. A verifier resolving fresh cannot distinguish a legitimate rotation from a
+substitution, because nothing links one version of the document to the previous one.
+`POST /agents/{id}/rotate` demands a self-proof, but that is an application-level
+control the registry chooses to enforce, and anyone with database or domain access
+goes around it. The guarantee is operational, not cryptographic.
+
+So the key is the agent's own and the identifier is hosted, and "self-owned" cannot
+be claimed for both.
+
+### Verifiers should pin the key, not the DID
+
+This follows directly, and it is the recommended consumption pattern rather than an
+optional hardening step.
+
+Resolve the DID at first contact, record the key, and thereafter treat the key as
+the thing being recognised. The DID stays useful as a lookup handle for status and
+for the charter, but a change of key becomes an event the verifier notices and
+decides about, instead of one it silently follows. That is what `POST /verify`
+checking the holder signature against the agent's current key is for, and consumers
+should retain that key rather than re-deriving it from the registry on every call.
+
+The registry then becomes advisory after first contact: it can decline to keep
+naming an agent, and it can publish revocation the verifier chooses to honour, but
+it cannot hand the agent's name to a different key behind the verifier's back. Every
+claim this document makes about the registry not capturing the agent depends on
+verifiers doing this. Without it, the substitution above is undetectable, and the
+registry has the same power over an agent that an IdP has over a person.
 
 ### Is the registry an IdP?
 
@@ -90,22 +117,33 @@ Partly, and it is worth naming exactly where rather than asserting it isn't.
 | In the request path | yes | no, issuance only |
 | Owns the namespace | yes | yes |
 | Identity survives leaving | no | no |
+| Can substitute the key behind the name | yes | yes, unless the verifier pinned it |
 
-Two of four. Not an IdP on custody or on request-path involvement, and squarely one
-on namespace and survivability. The `did:web` choice is what puts it there.
+Not an IdP on custody or on request-path involvement, and squarely one on namespace
+and survivability. The last row is the uncomfortable one, and it is not a property of
+the design so much as of `did:web`.
 
-The distinction that does hold is narrower than "we are not an IdP," and it is this:
-the registry owns a name, not a capability. It can stop naming an agent. It cannot
-stop that agent proving it is the same agent, because the key is not the registry's
-to revoke. So an agent can enrol at a second registry with the same key, take a new
-DID in that namespace, and demonstrate continuity across both. Services that pinned
-the old DID have to decide whether to accept the link, but the link is provable.
+The distinction that does hold is narrower than "we are not an IdP," and it has a
+condition attached: the registry owns a name, not a capability, *for verifiers that
+pinned the key*. It can stop naming an agent. It cannot stop that agent proving it is
+the same agent, because the key is not the registry's to revoke. An agent can enrol
+at a second registry with the same key, take a new DID in that namespace, and
+demonstrate continuity across both. Services that pinned the old DID have to decide
+whether to accept the link, but the link is provable.
 
-A human cannot do this. Nobody walks out of an IdP and demonstrates cryptographically
-to the next one that they are the same person, which is why for humans the name is
-the identity: there is nothing underneath it. For agents there is a key underneath,
-so the name is detachable. That is the whole argument, and it is the reason this
-registry can own a namespace without the capture following.
+Drop the pinning and the distinction collapses, because the registry can then point
+the name at a key of its choosing and no verifier is the wiser. Anti-capture here is
+a consumption discipline, not something the issuer can guarantee unilaterally. An
+issuer that could guarantee it would need cryptographic continuity between DID
+document versions, which `did:web` does not provide and `did:webvh` does; see
+[standards-watch.md](standards-watch.md).
+
+Given the pinning, a human still cannot do any of this. Nobody walks out of an IdP
+and demonstrates cryptographically to the next one that they are the same person,
+which is why for humans the name is the identity: there is nothing underneath it. For
+agents there is a key underneath, so the name is detachable. That is the whole
+argument, and it is the reason this registry can own a namespace without the capture
+necessarily following.
 
 ## Identity is acquired on need, not at birth
 
