@@ -220,6 +220,69 @@ trust framework for credential issuers, nothing playing the role OIDC federation
 plays. For one issuer you run yourself this is trivial. At ten issuers you don't
 control it is a governance problem, and federation may be the better answer.
 
+## When the issuer matters
+
+The gate-to-term move has a further step. Once the issuer is a term, the allowlist
+stops being a separate artifact and becomes policy, and policy can be proportionate
+to what is being asked. A pre-configured gate fires before it knows the stakes. A
+policy knows the whole request:
+
+- known issuer, `publish` → permit
+- unknown issuer, read-only, low-value resource → permit and log, don't pin
+- known issuer, `admin` → permit only with a fresh human approval
+
+That is "the relying party decides in the moment" made operational. It is also the
+honest answer to the claim that a credential can be verified from anywhere. You can,
+and what makes that safe is the policy bounding what a credential of unknown
+provenance is allowed to reach.
+
+Trust still has to ground somewhere, and only one of the options genuinely removes
+the enumeration:
+
+- Enumerate the issuers in policy. A real improvement, since it is versioned with
+  the rest of the rules and evaluated alongside context, but it is the map
+  relocated, not removed.
+- Chain to an anchor. The issuer presents its own credential from something already
+  trusted, so one entry covers many issuers. This is x509 with extra steps, and it
+  works.
+- Evaluate a property rather than an identity: the issuer's domain matches the
+  resource owner, or the issuer is the tenant. Genuine dissolution, but only where
+  such a property exists.
+- Accept unknown provenance and bound the blast radius instead. Enumeration cannot
+  express this, and it is what makes the other three optional.
+
+### How much issuer do you actually need
+
+Proof of key control is issuer-independent. A DID and a signature establish that the
+same entity is back, which is enough for continuity, audit, rate limiting, and
+pinning. Nobody considers SSH broken for lacking a CA. The issuer only enters when
+you are relying on something it asserted, and it matters in proportion to how much
+work that assertion is doing.
+
+- Identifier only. The credential provides continuity, not authority. The issuer is
+  irrelevant and checking it is ceremony.
+- Corroborated. Recall that `allowed = charter ∩ grant ∩ policy`. A forged charter
+  claiming `admin` does not get admin; it gets clamped by the other terms. The
+  charter's integrity therefore matters in proportion to how far it is the binding
+  constraint. Where the human's grant is already narrow, a lying charter buys an
+  attacker very little.
+- Sole source. The charter is the tightest term, or the only one: agent-to-agent
+  with no human in the loop, or a powerful principal where the charter's narrowing
+  is the actual restraint. Here the issuer is the whole basis of the decision.
+
+Skipping the issuer check is sound as a decision and dangerous as an omission, and
+the two are indistinguishable in the code. It also decays. Extend the charter to
+gate a new capability and it quietly becomes the binding constraint, at which point
+a policy that was correct on Tuesday is a hole on Friday. If you skip the check,
+record why next to the policy, because the fact that made it safe is a fact about
+the other terms in the intersection, not about the credential.
+
+This is the Regime A move applied one level up. Regime A removes the boundary rather
+than securing it, where the session already carries what is needed. Here the vouch
+earns its keep only where its claims are doing real work, and the rest of the time a
+stable identifier is the whole requirement. Identity on need, turned on the issuer
+instead of the agent.
+
 ## Where this sits in 2026
 
 The same ideas are being worked on from several directions. The repo should map
@@ -318,3 +381,18 @@ is minted in advance, so being early costs little. The failure mode to avoid is
 rebuilding primitives that are being standardized. The durable part is the
 synthesis and the closed-loop demos that prove it against consumers you actually
 run.
+
+One bias worth naming. This document repeatedly resolves hard questions by moving
+them into the authorization decision, which is the natural move for someone who
+already owns a policy engine and reaches for it. A PKI person would answer the same
+questions with chained anchors. A platform engineer would answer them with SPIFFE
+and stop asking. "It is an authorization problem" may well be right, but it is also
+conveniently right here, and it has not been tested against anyone whose default
+tool is something else.
+
+The related risk is that the framework becomes accommodating enough to stop making
+predictions. "The issuer matters as much as its claims are load-bearing" is true and
+close to unfalsifiable. The claims here that predict something are the ones worth
+defending: nothing is minted in advance, and Regime A should visibly reduce demand
+for agent identity in-session rather than increase it. If those two turn out to be
+false, the flexible parts do not save the argument.
