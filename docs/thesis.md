@@ -191,16 +191,25 @@ the party carrying the risk at first contact. See
 (`azd ⊆ charter.can`).
 
 The assertion comes from a third party. Token exchange is structurally two-party:
-the verifier trusts the issuer, and the issuer vouches for the actor. The actor's
-attributes are therefore whatever that issuer chose to put in them, which means the
-IdP has to administer every agent it can say anything about. The agent's ceiling is
-something you configured. A charter is signed by someone who is not in the token
-path at all: the operator vouches, the registry signs, and the IdP can decide about
-an agent it never onboarded.
+the verifier trusts the issuer, and the issuer vouches for the actor. Be careful
+what that does and doesn't imply. Federation already scales across agents perfectly
+well: trust a workload issuer once and every agent it vouches for is accepted, with
+no per-agent registration at the relying party. Per-agent administration exists in
+both models and sits upstream in both, as a service account, a SPIRE entry, or an
+enrollment voucher. Counting configurations is not the argument.
 
-The second point is the one that pays. With one operator it is a rounding error.
-With ten teams provisioning their own agents, the client-registration equivalent is
-ten onboarding processes and a directory you now own.
+The difference is what the token carries. A federated workload token authenticates
+and stops: it says this is workload X at issuer Y, and says nothing about what X may
+do. The ceiling has to live somewhere else, as a mapping from identifier to
+permitted scope that the relying party maintains. Trusting the issuer bought
+identity, not authority. A charter carries the ceiling as claims signed by the
+operator, so it travels with the agent.
+
+That scales on verifiers, not on agents. One relying party maintaining one
+identifier-to-scope table is unremarkable; it is just an authorization system. Five
+relying parties each maintaining their own answer to "what may agent X do" is five
+copies of a fact the operator already knows and has already signed, drifting
+independently.
 
 ### The bill
 
