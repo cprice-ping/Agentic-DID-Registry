@@ -149,6 +149,173 @@ Nothing in the middle is new. The registry supplies the agent side, the human si
 is a solved system you already run, and the PDP intersects them. What's left is
 modeling the delegation in the ReBAC store and writing the intersection policy.
 
+## Exchange or presentation
+
+The question people arrive with is "why not just use plain JWTs?", and the
+comparison worth making is against RFC 8693 token exchange with `subject_token` and
+`actor_token`, because that is the incumbent, it is deployed, and it works. If this
+project can't say precisely what it adds, it is only machinery. Inside a single
+trust domain it adds nothing: when one IdP issues or federates both sides and mints
+the result, a DID is a second trust root and an extra resolution step for a problem
+that domain doesn't have. The four cases in
+[When any of this is load-bearing](#when-any-of-this-is-load-bearing) are where the
+comparison starts to matter.
+
+But the question is framed wrong, so discard the format first. Both sides are JWTs.
+A charter issues as `vc+jwt`, an `actor_token` is a JWT, both carry `iss`, both are
+signed, and both can be verified by anyone who can reach the key. Nothing here turns
+on the encoding. What differs is what the surrounding protocol requires be done with
+them.
+
+Three things get claimed for credentials that are really claims about something
+else:
+
+- **"The credential is self-describing; a JWT needs pre-configuration."** A JWT
+  carries `iss` in the body and `kid` in the header. Standard validation reads
+  `iss`, fetches `.well-known/openid-configuration`, takes `jwks_uri`, and
+  verifies. That is the same shape as resolving a `did:web` and checking the DID
+  document. Both use the token's own contents to find the key that validates the
+  token.
+- **"Any issuer can present it, and the verifier just checks the token."** Anyone
+  can mint a DID and sign a charter claiming `capabilities: [admin]`, and it will
+  verify perfectly: signature valid, key resolves, structure conformant.
+  Verification is self-contained; trust is not. A verifier that accepts any
+  well-formed credential is an open door with good cryptography on it.
+- **"Granular decisions need credentials."** They need a policy engine, and the
+  claims still in front of it. `if this issuer and this agent and this capability,
+  then this token shape` can be written against plain JWT claims by any PDP,
+  provided the PDP can still see them.
+
+That last clause is the whole argument.
+
+### The actual axis
+
+In an exchange, an intermediary validates the issuer and mints a new token. That
+token is a decision, already taken; everything downstream inherits it and can only
+narrow. In a presentation, the credential arrives at the decision point intact, no
+decision has been taken yet, and every field in it is available as input.
+
+The trust check at an STS has four properties:
+
+| | |
+|---|---|
+| mandatory | no token without it |
+| prior | resolved before the request is known |
+| binary | pass or fail, no gradation |
+| remote | at the STS, not at the decision point |
+
+*Prior* is the one that costs you. The issuer term is bound and consumed before the
+claims exist as decision input, so a joint decision over issuer, claims, and context
+is never available: one of those variables was answered upstream, by something that
+did not know what would be asked. That is the same observation as saying the issuer
+is a gate rather than a term, seen from the other side. See
+[charter-mapping.md](charter-mapping.md) for the resulting mint rule
+(`azd ⊆ charter.can`).
+
+Presentation defers the decision instead of front-loading it, and deferral is what
+buys the choice. It is not a property of VCs. Hand a raw JWT to a PDP as evidence
+rather than exchanging it and you get the same deferral. The ecosystems differ far
+more than the formats do: credential tooling assumes presentation, OAuth tooling
+assumes an STS.
+
+### What the charter adds on top
+
+Deferral is topology, and any format can have it. The charter contributes something
+separate: provenance.
+
+Token exchange is structurally two-party: the verifier trusts the issuer, and the
+issuer vouches for the actor. Be careful what that does and doesn't imply.
+Federation already scales across agents perfectly well: trust a workload issuer once
+and every agent it vouches for is accepted, with no per-agent registration at the
+relying party. Per-agent administration exists in both models and sits upstream in
+both, as a service account, a SPIRE entry, or an enrollment voucher. Counting
+configurations is not the argument.
+
+The difference is what the token carries. A federated workload token authenticates
+and stops: it says this is workload X at issuer Y, and says nothing about what X may
+do. The ceiling has to live somewhere else, as a mapping from identifier to
+permitted scope that the relying party maintains. Trusting the issuer bought
+identity, not authority. A charter carries the ceiling as claims signed by the
+operator, so it travels with the agent.
+
+That scales on verifiers, not on agents. One relying party maintaining one
+identifier-to-scope table is unremarkable; it is just an authorization system. Five
+relying parties each maintaining their own answer to "what may agent X do" is five
+copies of a fact the operator already knows and has already signed, drifting
+independently.
+
+### The bill
+
+The trust list is work that federation was doing for you. Someone has to curate it,
+and revocation becomes an explicit fetch (`/resolve`, the status list) rather than
+something that falls out of short token lifetimes. There is no widely-deployed
+trust framework for credential issuers, nothing playing the role OIDC federation
+plays. For one issuer you run yourself this is trivial. At ten issuers you don't
+control it is a governance problem, and federation may be the better answer.
+
+## When the issuer matters
+
+The gate-to-term move has a further step. Once the issuer is a term, the allowlist
+stops being a separate artifact and becomes policy, and policy can be proportionate
+to what is being asked. A pre-configured gate fires before it knows the stakes. A
+policy knows the whole request:
+
+- known issuer, `publish` → permit
+- unknown issuer, read-only, low-value resource → permit and log, don't pin
+- known issuer, `admin` → permit only with a fresh human approval
+
+That is "the relying party decides in the moment" made operational. It is also the
+honest answer to the claim that a credential can be verified from anywhere. You can,
+and what makes that safe is the policy bounding what a credential of unknown
+provenance is allowed to reach.
+
+Trust still has to ground somewhere, and only one of the options genuinely removes
+the enumeration:
+
+- Enumerate the issuers in policy. A real improvement, since it is versioned with
+  the rest of the rules and evaluated alongside context, but it is the map
+  relocated, not removed.
+- Chain to an anchor. The issuer presents its own credential from something already
+  trusted, so one entry covers many issuers. This is x509 with extra steps, and it
+  works.
+- Evaluate a property rather than an identity: the issuer's domain matches the
+  resource owner, or the issuer is the tenant. Genuine dissolution, but only where
+  such a property exists.
+- Accept unknown provenance and bound the blast radius instead. Enumeration cannot
+  express this, and it is what makes the other three optional.
+
+### How much issuer do you actually need
+
+Proof of key control is issuer-independent. A DID and a signature establish that the
+same entity is back, which is enough for continuity, audit, rate limiting, and
+pinning. Nobody considers SSH broken for lacking a CA. The issuer only enters when
+you are relying on something it asserted, and it matters in proportion to how much
+work that assertion is doing.
+
+- Identifier only. The credential provides continuity, not authority. The issuer is
+  irrelevant and checking it is ceremony.
+- Corroborated. Recall that `allowed = charter ∩ grant ∩ policy`. A forged charter
+  claiming `admin` does not get admin; it gets clamped by the other terms. The
+  charter's integrity therefore matters in proportion to how far it is the binding
+  constraint. Where the human's grant is already narrow, a lying charter buys an
+  attacker very little.
+- Sole source. The charter is the tightest term, or the only one: agent-to-agent
+  with no human in the loop, or a powerful principal where the charter's narrowing
+  is the actual restraint. Here the issuer is the whole basis of the decision.
+
+Skipping the issuer check is sound as a decision and dangerous as an omission, and
+the two are indistinguishable in the code. It also decays. Extend the charter to
+gate a new capability and it quietly becomes the binding constraint, at which point
+a policy that was correct on Tuesday is a hole on Friday. If you skip the check,
+record why next to the policy, because the fact that made it safe is a fact about
+the other terms in the intersection, not about the credential.
+
+This is the Regime A move applied one level up. Regime A removes the boundary rather
+than securing it, where the session already carries what is needed. Here the vouch
+earns its keep only where its claims are doing real work, and the rest of the time a
+stable identifier is the whole requirement. Identity on need, turned on the issuer
+instead of the agent.
+
 ## Where this sits in 2026
 
 The same ideas are being worked on from several directions. The repo should map
@@ -247,3 +414,18 @@ is minted in advance, so being early costs little. The failure mode to avoid is
 rebuilding primitives that are being standardized. The durable part is the
 synthesis and the closed-loop demos that prove it against consumers you actually
 run.
+
+One bias worth naming. This document repeatedly resolves hard questions by moving
+them into the authorization decision, which is the natural move for someone who
+already owns a policy engine and reaches for it. A PKI person would answer the same
+questions with chained anchors. A platform engineer would answer them with SPIFFE
+and stop asking. "It is an authorization problem" may well be right, but it is also
+conveniently right here, and it has not been tested against anyone whose default
+tool is something else.
+
+The related risk is that the framework becomes accommodating enough to stop making
+predictions. "The issuer matters as much as its claims are load-bearing" is true and
+close to unfalsifiable. The claims here that predict something are the ones worth
+defending: nothing is minted in advance, and Regime A should visibly reduce demand
+for agent identity in-session rather than increase it. If those two turn out to be
+false, the flexible parts do not save the argument.
