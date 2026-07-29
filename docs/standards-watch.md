@@ -65,6 +65,46 @@ shape for agents.
 - **`draft-yl-agent-id-requirements`** — requirements framing; watch for WG
   consensus direction.
 
+## DID method: `did:web` now, `did:webvh` as the identified upgrade
+
+A separate axis from credential format, and the one place where our choice has a
+known structural gap rather than a cosmetic one.
+
+**Why `did:web` is right today.** Resolution is an HTTPS GET, so every verifier can
+do it with no library and no new trust root. ATProto resolves it natively, which the
+Watershed PDS needs and which most alternatives fail immediately. It gives
+revocation somewhere to publish and an identifier that survives key rotation —
+`POST /agents/{id}/rotate` exists because of it. `did:key` is fully self-rooted but
+breaks continuity on every rotation and has nowhere to put status, which trades a
+real capability set for a property that key-pinning delivers more cheaply.
+
+**The gap.** `did:web` has no cryptographic continuity between DID document
+versions. Whoever serves the document declares which key controls the DID, so the
+key can be substituted and a verifier resolving fresh cannot tell substitution from
+legitimate rotation. Our rotate endpoint demands a self-proof, but that is an
+application-level control the registry chooses to enforce — database or domain
+access goes around it. **The guarantee is operational, not cryptographic.**
+
+**Mitigation today (consumption-side, and load-bearing).** Verifiers pin the key at
+first contact and treat a key change as an event to notice rather than follow. See
+[thesis.md](thesis.md#verifiers-should-pin-the-key-not-the-did) — every anti-capture
+claim this project makes depends on it, and no issuer-side change substitutes for it.
+
+**The upgrade.** `did:webvh` (DID Web + Verifiable History, formerly `did:tdw`)
+extends `did:web` with an append-only log in which each DID document version is
+signed and authorized by the preceding key, plus a self-certifying identifier and
+provable continuity across a domain move. That closes the substitution hole
+structurally, and makes the registry-portability story in thesis.md real rather than
+dependent on services agreeing to link two DIDs.
+
+**Cost:** resolver support, which is the whole problem. Far less deployed than
+`did:web`, and a stock ATProto PDS will not resolve it — adopting it means carrying
+support on our own PDS and waiting on everyone else. Check current adoption before
+committing; this file's reading is mid-2026 and DID-method uptake moves.
+
+**Revisit when:** ATProto (or another consumer we own) can resolve `did:webvh`, or a
+consumer needs registry-independence it can verify rather than take on trust.
+
 ## Endpoint ↔ draft correspondence
 
 | This repo | Conforms toward |
@@ -74,6 +114,7 @@ shape for agents.
 | `/verify` | A2A portable-credential present-and-verify · DIF presentation proof |
 | operator voucher enrollment | `draft-klrc-aiagent-auth` provisioning · WIMSE issuance |
 | `/.well-known/did.json` (trust anchor) | WIMSE trust-domain anchors |
+| `/agents/{id}/did.json` (DID method) | `did:web` today · `did:webvh` is the upgrade — see above |
 | `/status/list` (revocation) | **divergent** — see below |
 
 ## What conforming costs: mostly JSON, one behavioral exception, no rearchitecture
@@ -117,6 +158,8 @@ Don't conform now — chasing `-00` drafts means re-chasing them every revision.
 Keep the producers flexible (they are) and revisit when:
 - **WIMSE arch → RFC** (the most likely first hard target; aligns `/resolve`), or
 - **AIP / ACAP reach `-02`+ with WG adoption** (aligns the charter + framing), or
+- **`did:webvh` becomes resolvable by a consumer we own** (closes the key-substitution
+  gap structurally instead of by consumption discipline), or
 - a consumer you own (P1AZ, an A2A peer) needs a specific profile to interop.
 
 The `eddsa-jcs-2022` envelope deviation (multibase `u`→`z` + proofConfig
