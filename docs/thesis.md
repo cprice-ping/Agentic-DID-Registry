@@ -415,13 +415,24 @@ rebuilding primitives that are being standardized. The durable part is the
 synthesis and the closed-loop demos that prove it against consumers you actually
 run.
 
-One bias worth naming. This document repeatedly resolves hard questions by moving
-them into the authorization decision, which is the natural move for someone who
-already owns a policy engine and reaches for it. A PKI person would answer the same
-questions with chained anchors. A platform engineer would answer them with SPIFFE
-and stop asking. "It is an authorization problem" may well be right, but it is also
-conveniently right here, and it has not been tested against anyone whose default
-tool is something else.
+One assumption worth naming, because it is load-bearing throughout and never argued
+for. This document takes it as given that authority is evaluated at use time, by the
+relying party, against claims presented in a token. Which engine does the evaluating
+is deliberately out of scope: an enterprise PDP, a peer agent checking two
+signatures offline, and a PDS accepting a record are all the same shape here, and
+[scope-and-boundaries.md](scope-and-boundaries.md) exists to stop any particular one
+of them leaking in. The commitment is to the evaluation, not to the evaluator.
+
+There are designs that reject it. In an object-capability system, possession of an
+unforgeable reference is the authority, so at use time there is nothing to check: no
+identifier, no claim, no decision. Attestation-first designs care what the code is
+rather than what it asserts about itself. A charter is squarely a claims-model
+artifact, since `capabilities: [publish]` is an assertion someone has to evaluate,
+where an object-capability design would hand over an unforgeable publish reference
+and leave nothing to evaluate. This document never argues that claims beat
+capabilities; it assumes it. That is the place to attack the argument, and it is why
+the UCAN entry above is underweight, read as a credential format when it is partly a
+challenge to the whole frame.
 
 The related risk is that the framework becomes accommodating enough to stop making
 predictions. "The issuer matters as much as its claims are load-bearing" is true and
