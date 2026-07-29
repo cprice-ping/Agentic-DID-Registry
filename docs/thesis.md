@@ -6,9 +6,16 @@ for the issuance/consumption split it assumes.
 
 ## Purpose
 
-A neutral origin for portable, self-owned agent identity. Personal and custom
-agents both carry it, and no consuming system owns it. The point is to avoid
-repeating, for agents, the mistake we made when we let IdPs own human identity.
+Agents do not need an identity of their own. They need a key they control, and a
+vouched representation of their nature that each service can evaluate on its own
+terms. This repo issues that representation. The point is to give a service enough
+to decide without an IdP owning the agent, and so to avoid repeating, for agents,
+the mistake we made when we let IdPs own human identity.
+
+"Identity" is the wrong word for what an agent needs, and using it costs you the
+argument before it starts: say agents need identity and people hear that agents need
+accounts. What a service actually wants to know is what this thing is and what it is
+for, not who it is.
 
 ## The mistake we're not repeating
 
@@ -23,18 +30,82 @@ necessity. This is the point the project started from ("a wallet exists because
 humans can't sign; agents can"), applied to ownership instead of custody: one
 cause (agents hold their own keys), two results (no wallet, no IdP owner).
 
-## Identity vs. identifier
+## What the agent actually owns
 
-Identity is durable, portable, and self-owned. The agent holds its keys, a neutral
-origin vouches for it, and it travels across contexts. It belongs to the agent.
+Four layers, with different owners and different lifetimes. Collapsing them is where
+the confusion lives:
 
-An identifier is a local handle a system assigns to reference an identity in its
-own namespace, so it can hang state and decisions off it. It belongs to the
-system and is disposable.
+| Layer | Owned by | Lifetime |
+|---|---|---|
+| Key | the agent | durable; the only real birthright |
+| DID | the registry's namespace | survives key rotation; dies with the registry |
+| Charter | operator vouches, registry signs | minted on need, `CHARTER_TTL_DAYS` |
+| Projection | the verifier | one presentation |
 
-The rule is that an identifier points at an identity. Systems mint identifiers
-freely: a SpiceDB object id, a `sub_hash`, a database row. The trouble starts when
-a system's identifier becomes the identity, because then the capture is back.
+Only the first is genuinely the agent's own. Everything above it is representation,
+and representation is allowed to be plural: nothing stops two registries issuing
+against the same key, one saying the agent may publish and another certifying it for
+something else. The key is the join point. The repo issues a single charter today,
+so that is a property of the model before it is a property of the code.
+
+The old rule survives with a sharper target: an identifier points at a key. Systems
+mint identifiers freely, a SpiceDB object id, a `sub_hash`, a database row, and the
+DID is one of them too. The trouble starts when a system's identifier becomes the
+thing itself, because then the capture is back.
+
+Tailoring happens at the bottom layer, not the top. The agent holds one charter and
+each service sees a cut of it sized to what that service needs to decide, which is
+what SD-JWT-VC selective disclosure in `app/jwt_vc.py` is for. A second service does
+not mean a second identity or a second charter.
+
+### The identifier is hosted, and that is a real dependency
+
+This repo issues `did:web`, not `did:key`, and the difference decides who owns the
+identifier.
+
+With `did:key` the identifier is the key. Fully self-rooted, no infrastructure, and
+nobody can take it away. But rotating the key means a new identifier, so continuity
+breaks, and there is nowhere to publish revocation.
+
+With `did:web` the identifier is a hosted location resolving to a document that
+contains the key. The identifier then survives key rotation, which is why
+`POST /agents/{id}/rotate` can exist at all, and revocation has somewhere to live.
+
+The price is that the durable identifier depends on a domain continuing to resolve.
+If the registry disappears, the agent still holds its key but its identifier is dead.
+So the key is the agent's own and the identifier is hosted, and "self-owned" should
+not be claimed for both.
+
+A verifier that wants none of that dependency can pin the key rather than the DID.
+After first contact the registry becomes advisory, which is the cheapest anti-capture
+measure available and costs nothing to offer.
+
+### Is the registry an IdP?
+
+Partly, and it is worth naming exactly where rather than asserting it isn't.
+
+| | an IdP | this registry |
+|---|---|---|
+| Holds the credential | yes, signs on your behalf | no, the agent signs |
+| In the request path | yes | no, issuance only |
+| Owns the namespace | yes | yes |
+| Identity survives leaving | no | no |
+
+Two of four. Not an IdP on custody or on request-path involvement, and squarely one
+on namespace and survivability. The `did:web` choice is what puts it there.
+
+The distinction that does hold is narrower than "we are not an IdP," and it is this:
+the registry owns a name, not a capability. It can stop naming an agent. It cannot
+stop that agent proving it is the same agent, because the key is not the registry's
+to revoke. So an agent can enrol at a second registry with the same key, take a new
+DID in that namespace, and demonstrate continuity across both. Services that pinned
+the old DID have to decide whether to accept the link, but the link is provable.
+
+A human cannot do this. Nobody walks out of an IdP and demonstrates cryptographically
+to the next one that they are the same person, which is why for humans the name is
+the identity: there is nothing underneath it. For agents there is a key underneath,
+so the name is detachable. That is the whole argument, and it is the reason this
+registry can own a namespace without the capture following.
 
 ## Identity is acquired on need, not at birth
 
@@ -89,19 +160,19 @@ operator-vouched enrollments use the same endpoint with a different signer.
 
 ## Consumption is projection
 
-Identity is self-owned upstream. At each consumption edge it is projected into
-whatever that substrate needs:
+This is the fourth layer in practice. At each consumption edge the charter is
+projected into whatever that substrate needs:
 
 - a resource server takes an OAuth bearer, via token exchange (`act.sub` carries
-  the durable identity; the bearer is the disposable local projection)
+  the durable identifier; the bearer is the disposable local projection)
 - ATProto/Watershed takes a native record or handle
 - a peer agent takes a presented VP
 
 Projection isn't a defeat or a transfer of ownership. It is the
-identifier-points-at-identity rule applied to credentials. The one primitive
-shared across every substrate is proof of control (`present()` / `verify()`): it
-is how a self-owned identity becomes a system's trustable local identifier without
-the system owning it.
+identifier-points-at-a-key rule applied to credentials. The one primitive shared
+across every substrate is proof of control (`present()` / `verify()`): it is how a
+key the agent controls becomes a system's trustable local identifier without the
+system owning the agent.
 
 ## Two-sided authority
 
@@ -115,14 +186,14 @@ can't serve both:
 
 | | `sub` side (human) | `act` side (agent) |
 |---|---|---|
-| Enrollment | account, IdP-managed | self-owned DID, voucher-enrolled |
+| Enrollment | account, IdP-managed | self-held key, voucher-enrolled |
 | Keys | held by an IdP | held by the agent |
 | Authority | entitlements / relationships (ReBAC) | a declared charter (a ceiling) |
 | Maturity | solved (e.g. PingOne + SpiceDB) | the new part (this registry) |
 
 Force the agent onto the human side, as an entity row keyed by a `sub_hash`, and
-you lose what makes agent identity work: portability, self-ownership, an
-identifier that only points. You wouldn't put humans on the agent side either,
+you lose what makes the agent side work: a key the agent holds, portability across
+namespaces, an identifier that only points. You wouldn't put humans on the agent side either,
 since they already have accounts and can't hold keys. Each side has its own nature
 and its own registry.
 
