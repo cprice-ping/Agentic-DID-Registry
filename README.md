@@ -1,11 +1,11 @@
 # Agent Identifier Registry
 
 Agentic is an authorization problem. The minimal thing a decision needs from an
-agent is a stable, provable identifier it can derive context from: self-rooted
-(the agent's own key) and vouched (a need-based attestation). This repo mints that
+agent is a stable, provable identifier it can derive context from: rooted in a key
+the agent holds, and vouched by a need-based attestation. This repo mints that
 identifier and binds its durable context, the charter, and does no more. The
-decision, and all fresh context, live with the consumer. Identity here is a join
-key for a decision, not a passport.
+decision, and all fresh context, live with the consumer. What the agent carries is
+a join key for a decision, not a passport.
 
 That makes this an issuer. It mints `did:web` identifiers and issues signed
 charter Verifiable Credentials, with no human signup flows, and private keys never
