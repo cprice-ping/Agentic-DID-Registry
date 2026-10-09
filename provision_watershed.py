@@ -29,8 +29,10 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from operator_cli import _b64url, _load_key, _public_jwk
-from registry_client import RegistryClient
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from operator_cli import _b64url, _load_key, _public_jwk, jwk_thumbprint
+from registry_client import RegistryClient, _public_key_to_jwk
 
 # ── Agents on this node. Edit capabilities/scope/intent as needed. ────────────
 NODE = "napa-node-01"
@@ -63,8 +65,12 @@ AGENTS = [
 ]
 
 
-def mint_voucher(operator_key, registry_did, agent_id, capabilities, ttl=600):
-    """Operator-signed enrollment voucher (EdDSA JWT). Bounds the charter."""
+def mint_voucher(operator_key, registry_did, agent_id, capabilities, ttl=600, agent_jwk=None):
+    """
+    Operator-signed enrollment voucher (EdDSA JWT). Bounds the charter, and when
+    *agent_jwk* is given, binds the voucher to that key (cnf.jkt) so it is useless
+    to anyone else who sees it.
+    """
     jwk = _public_jwk(operator_key)
     now = int(datetime.now(timezone.utc).timestamp())
     payload = {
@@ -77,6 +83,8 @@ def mint_voucher(operator_key, registry_did, agent_id, capabilities, ttl=600):
         "purpose": "enroll",
         "capabilities": capabilities,
     }
+    if agent_jwk is not None:
+        payload["cnf"] = {"jkt": jwk_thumbprint(agent_jwk)}
     header = {"alg": "EdDSA", "typ": "enrollment-voucher+jwt", "kid": jwk["kid"]}
     h = _b64url(json.dumps(header, separators=(",", ":")).encode())
     p = _b64url(json.dumps(payload, separators=(",", ":")).encode())
@@ -107,7 +115,11 @@ def main():
     results = []
     for a in agents:
         agent_id = uuid.uuid4().hex  # opaque, immutable; becomes the DID path
-        voucher = mint_voucher(operator_key, args.registry_did, agent_id, a["capabilities"])
+        agent_key = Ed25519PrivateKey.generate()
+        voucher = mint_voucher(
+            operator_key, args.registry_did, agent_id, a["capabilities"],
+            agent_jwk=_public_key_to_jwk(agent_key.public_key()),
+        )
         charter = {
             "agent_id": agent_id,
             "name": a["name"],
@@ -117,7 +129,7 @@ def main():
             "operator": args.registry_did,
         }
         try:
-            did = rc.provision(charter, voucher=voucher)
+            did = rc.provision(charter, voucher=voucher, private_key=agent_key)
         except Exception as exc:  # noqa: BLE001 — surface the failure per-agent
             print(f"  FAILED  {a['name']:>8}: {exc}")
             continue

@@ -21,9 +21,30 @@ Voucher format (compact JWS, alg=EdDSA)
              "iat":       <issued at>,
              "exp":       <expiry — short-lived>,
              "jti":       <unique id — single use>,
+             "purpose":   "enroll" | "amend" | "revoke",
              "capabilities": [ ... ],            # max capabilities the charter may claim
+             "scopes":    [ ... ],               # optional — max scopes the charter may claim
+             "cnf":       { "jkt": <thumbprint> },  # optional — binds the voucher to
+                                                     # the agent's key (RFC 7638)
              "operator":  <did>                  # optional — pins charter.operator
            }
+
+Capabilities and scopes are opaque strings.  The registry clamps them (charter ⊆
+voucher) but never interprets them: ``publish:dev.watershed-agent.observation`` and
+``us-ca-sonoma`` mean something to a consuming service, not to the registry.
+
+Issuer ceilings
+---------------
+A trusted operator JWK may carry a private ``ceiling`` member:
+
+    { "kty": "OKP", "crv": "Ed25519", "x": ..., "kid": ...,
+      "ceiling": { "capabilities": [...], "scopes": [...] } }
+
+A voucher signed by that key may not exceed its ceiling (rejected, not clamped:
+an issuer trying to exceed its own ceiling is a signal, not a typo).  A voucher
+that omits a bounded dimension inherits the ceiling rather than being unbounded.
+That is what makes an always-on voucher signer (a node, a voucher service) safe
+to run: compromise it and it still cannot mint beyond what the registry allows it.
 
 The pluggability point: this module verifies a JWT against a configured trusted
 issuer set.  Today that set is operator keys.  Additional trusted issuers (a
@@ -63,13 +84,19 @@ class VoucherGrant:
         jti: str,
         issuer: str,
         purpose: str,
+        scopes: Optional[list[str]] = None,
+        jkt: Optional[str] = None,
+        issuer_kid: str = "",
     ) -> None:
         self.agent_id = agent_id
-        self.capabilities = capabilities  # None ⇒ voucher set no cap bound
+        self.capabilities = capabilities  # None ⇒ no cap bound (after ceiling applied)
         self.operator = operator
         self.jti = jti
         self.issuer = issuer
-        self.purpose = purpose  # "enroll" (default) | "revoke"
+        self.purpose = purpose  # "enroll" (default) | "amend" | "revoke"
+        self.scopes = scopes  # None ⇒ no scope bound (after ceiling applied)
+        self.jkt = jkt  # RFC 7638 thumbprint the enrolling key must match, if set
+        self.issuer_kid = issuer_kid
 
 
 def load_operator_keys(path: Path) -> dict[str, dict]:
@@ -78,6 +105,7 @@ def load_operator_keys(path: Path) -> dict[str, dict]:
 
     Returns a mapping of kid → JWK.  Keys without a ``kid`` are indexed by ``""``
     so a voucher header that omits ``kid`` can still match a single-key JWKS.
+    A JWK's optional ``ceiling`` member is kept and enforced by verify_voucher.
     Missing file ⇒ empty trust set (every voucher will be rejected).
     """
     if not path.exists():
@@ -166,9 +194,19 @@ def verify_voucher(
     if not jti:
         raise VoucherError("Voucher has no jti — cannot enforce single use.")
 
-    capabilities = payload.get("capabilities")
-    if capabilities is not None and not isinstance(capabilities, list):
-        raise VoucherError("Voucher 'capabilities' must be a list if present.")
+    capabilities = _optional_str_list(payload, "capabilities")
+    scopes = _optional_str_list(payload, "scopes")
+
+    jkt = None
+    cnf = payload.get("cnf")
+    if cnf is not None:
+        if not isinstance(cnf, dict) or not isinstance(cnf.get("jkt"), str):
+            raise VoucherError("Voucher 'cnf' must be an object carrying a 'jkt' string.")
+        jkt = cnf["jkt"]
+
+    ceiling = jwk.get("ceiling") or {}
+    capabilities = _apply_ceiling("capabilities", capabilities, ceiling.get("capabilities"))
+    scopes = _apply_ceiling("scopes", scopes, ceiling.get("scopes"))
 
     return VoucherGrant(
         agent_id=agent_id,
@@ -177,4 +215,33 @@ def verify_voucher(
         jti=jti,
         issuer=payload.get("iss", ""),
         purpose=payload.get("purpose", "enroll"),
+        scopes=scopes,
+        jkt=jkt,
+        issuer_kid=kid,
     )
+
+
+def _optional_str_list(payload: dict, name: str) -> Optional[list[str]]:
+    value = payload.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise VoucherError(f"Voucher '{name}' must be a list of strings if present.")
+    return value
+
+
+def _apply_ceiling(
+    name: str, requested: Optional[list[str]], ceiling: Optional[list[str]]
+) -> Optional[list[str]]:
+    """Bound a voucher dimension by the signing key's ceiling, if it has one."""
+    if ceiling is None:
+        return requested
+    if requested is None:
+        return list(ceiling)
+    extra = [v for v in requested if v not in set(ceiling)]
+    if extra:
+        raise VoucherError(
+            f"Voucher {name} {extra} exceed the signing key's ceiling "
+            f"({sorted(ceiling)})."
+        )
+    return requested

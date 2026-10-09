@@ -47,6 +47,30 @@ class KeyRotationResponse(BaseModel):
     charter_vc: dict
 
 
+class CharterReissueRequest(BaseModel):
+    charter: dict = Field(
+        ...,
+        description=(
+            "The charter claims to issue.  Without a voucher this must be no wider "
+            "than the current charter (renewal); with an 'amend' voucher it is "
+            "bounded by the voucher instead."
+        ),
+    )
+    iat: int = Field(..., description="Unix time the request was signed (freshness).")
+    proof: dict = Field(
+        ...,
+        description=(
+            "Data Integrity proof over {did, charter, iat}, signed with the agent's "
+            "CURRENT private key."
+        ),
+    )
+
+
+class CharterReissueResponse(BaseModel):
+    did: str
+    charter_vc: dict
+
+
 class VerificationRequest(BaseModel):
     presentation: dict = Field(
         ...,

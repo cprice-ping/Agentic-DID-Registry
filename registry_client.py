@@ -217,10 +217,19 @@ class RegistryClient:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def provision(self, charter: dict, voucher: Optional[str] = None) -> str:
+    def provision(
+        self,
+        charter: dict,
+        voucher: Optional[str] = None,
+        private_key: Optional[Ed25519PrivateKey] = None,
+    ) -> str:
         """
         Generate a local Ed25519 keypair, register with the registry, and return
         the minted DID.
+
+        Pass *private_key* to enrol with a key generated beforehand, e.g. when
+        the voucher is bound to it (``cnf.jkt``) and so had to be minted after
+        the key existed.
 
         Self-enrollment requires an operator-signed enrollment voucher.  Pass it
         via *voucher*, or set the ``AGENT_ENROLLMENT_VOUCHER`` env var.  The
@@ -241,7 +250,7 @@ class RegistryClient:
             On unexpected HTTP errors from the registry.
         """
         agent_id = self._derive_agent_id(charter)
-        private_key = _generate_keypair()
+        private_key = private_key or _generate_keypair()
         public_key_jwk = _public_key_to_jwk(private_key.public_key())
 
         # Strip internal client-only key before sending to registry
@@ -579,6 +588,63 @@ class RegistryClient:
 
         # Persist the new key and refreshed charter only after the registry accepts.
         _save_private_key(new_key, key_path)
+        charter_path = self._charter_path(did)
+        charter_path.parent.mkdir(parents=True, exist_ok=True)
+        charter_path.write_text(json.dumps(data["charter_vc"], indent=2))
+        self.invalidate_cache(did)
+        return data
+
+    def reissue(
+        self,
+        did: str,
+        charter: Optional[dict] = None,
+        voucher: Optional[str] = None,
+    ) -> dict:
+        """
+        Get a fresh charter for an existing agent: same DID, same key, so pins and
+        bindings held by consumers survive.
+
+        Without *voucher* this is a renewal: *charter* (default: the current
+        claims) may only match or narrow the current charter, and only while it
+        is still active.  With an ``amend`` voucher the charter is bounded by the
+        voucher instead and may widen.
+
+        Returns the registry's response (did, charter_vc) and stores the new
+        charter locally.
+        """
+        key_path = self._key_path(did)
+        if not key_path.exists():
+            raise FileNotFoundError(
+                f"No private key for {did!r}. Run registry.provision() first."
+            )
+        key = _load_private_key(key_path)
+
+        if charter is None:
+            current = json.loads(self._charter_path(did).read_text())
+            charter = {
+                k: v for k, v in current.get("credentialSubject", {}).items() if k != "id"
+            }
+        iat = int(datetime.now(timezone.utc).timestamp())
+        proof = _make_proof(
+            key,
+            {"did": did, "charter": charter, "iat": iat},
+            verification_method=f"{did}#key-1",
+            proof_purpose="authentication",
+        )
+
+        agent_id = self._did_to_agent_id(did)
+        if not agent_id:
+            raise ValueError(f"Cannot derive agent_id from DID: {did!r}")
+        headers = {"Authorization": f"Bearer {voucher}"} if voucher else {}
+        with httpx.Client(timeout=self._http_timeout) as client:
+            resp = client.post(
+                f"{self._registry_url}/agents/{agent_id}/charter",
+                json={"charter": charter, "iat": iat, "proof": proof},
+                headers=headers,
+            )
+            resp.raise_for_status()
+        data = resp.json()
+
         charter_path = self._charter_path(did)
         charter_path.parent.mkdir(parents=True, exist_ok=True)
         charter_path.write_text(json.dumps(data["charter_vc"], indent=2))
