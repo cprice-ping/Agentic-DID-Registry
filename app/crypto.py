@@ -52,6 +52,20 @@ def public_key_to_jwk(public_key: Ed25519PublicKey, key_id: str = "key-1") -> di
     return {"kty": "OKP", "crv": "Ed25519", "x": b64url_encode(raw), "kid": key_id}
 
 
+def jwk_thumbprint(jwk: dict) -> str:
+    """
+    RFC 7638 JWK thumbprint (SHA-256, base64url) of an OKP public key.
+
+    Only the required members (crv, kty, x) are hashed, in lexicographic order
+    with no whitespace, so a kid or other extra members don't change the value.
+    """
+    if jwk.get("kty") != "OKP":
+        raise ValueError("jwk_thumbprint supports OKP keys only.")
+    required = {"crv": jwk["crv"], "kty": jwk["kty"], "x": jwk["x"]}
+    canonical = json.dumps(required, separators=(",", ":"), sort_keys=True)
+    return b64url_encode(hashlib.sha256(canonical.encode()).digest())
+
+
 def load_or_create_private_key(path: Path) -> Ed25519PrivateKey:
     """Load an Ed25519 private key from *path* (PEM/PKCS8), or generate and save one."""
     if path.exists():

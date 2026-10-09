@@ -143,6 +143,7 @@ Agents handle their own keys, so the wallet layer isn't needed:
 | `GET`    | `/resolve?subject={did}`      | none                     | Decision attributes keyed by the full DID    |
 | `POST`   | `/verify`                     | none                     | Verify a presentation (wallet-less, 2 sigs)  |
 | `POST`   | `/agents/{id}/rotate`         | agent self-proof         | Key rotation — updates DID doc + re-issues VC|
+| `POST`   | `/agents/{id}/charter`        | agent self-proof (+ amend voucher) | Reissue: renew (≤ current) or amend (≤ voucher), same DID and key |
 | `DELETE` | `/agents/{id}`                | operator voucher (revoke)| Revocation — DID doc returns tombstone       |
 
 Interactive docs at `/docs` when the server is running.
@@ -204,6 +205,30 @@ The agent presents it as `Authorization: Bearer <voucher>` (the client reads
 `AGENT_ENROLLMENT_VOUCHER` automatically). Vouchers are single-use (`jti`),
 audience-bound to the registry DID, and time-limited.
 
+Optional claims tighten it further, and all of them are backward compatible:
+
+- `cnf.jkt`: the RFC 7638 thumbprint of the agent's public key. The registry refuses
+  an enrolment with any other key, so a voucher seen in transit is useless to anyone
+  else. Set it with `--agent-jwk agent_public.jwk.json`. Bind it whenever the voucher
+  travels over a network rather than staying on one machine.
+- `scopes`: opaque strings such as `us-ca-sonoma`, clamped like capabilities. A
+  scoped voucher requires the charter to declare its scopes, because a missing list
+  would read as unbounded. Set it with `--scopes`.
+- Capabilities can name a service, e.g. `publish:dev.watershed-agent.observation`.
+  The registry clamps the strings and never interprets them. What they mean is up to
+  the service that reads them.
+
+A trusted key can carry a ceiling in the JWKS file. Vouchers it signs can't exceed
+the ceiling, and a voucher that omits a dimension inherits the ceiling instead of
+being unbounded. That is what makes it safe to run an always-on voucher signer, such
+as a node or a voucher service: if it is compromised, it still can't mint beyond what
+the registry allows it.
+
+```bash
+python operator_cli.py jwks --key node.key.pem --out node_jwks.json \
+    --ceiling-capabilities observe,publish --ceiling-scopes us-ca-napa
+```
+
 The operating environment is not the identity. An agent on a Raspberry Pi, in
 k8s, or on any cloud enrolls the same way. The trusted-issuer set is pluggable: a
 SPIFFE/SPIRE trust domain, a cloud workload-OIDC issuer, GitHub OIDC, or a TPM
@@ -214,6 +239,22 @@ how the identity is used, it doesn't define the identity.
 `POST /agents/{id}/rotate` is authenticated by the agent itself. The request
 carries a proof over `{did, new_public_key_jwk}` signed with the key being
 retired, so only the holder of the current private key can rotate. No voucher.
+
+`POST /agents/{id}/charter` reissues a charter with the same DID, the same key and
+the same status index, so pins and bindings held by consumers survive. The request
+carries a proof over `{did, charter, iat}` signed with the current key.
+
+- Renew, with no voucher: the new charter may only match or narrow the current one,
+  and only while the current one is still active. After expiry the operator has to
+  re-confirm.
+- Amend, with a voucher whose `purpose` is `amend`: the new charter is bounded by
+  the voucher, so it can widen. This is how an agent joins another service.
+  An expired charter can be amended, since the voucher is the operator
+  re-confirming. An amend voucher from a different operator than the current
+  charter's is refused (`409`) until one charter per operator exists.
+
+The client wraps both: `registry.reissue(did)` renews, and
+`registry.reissue(did, charter=..., voucher=...)` amends.
 
 ### Credential lifetime & revocation
 

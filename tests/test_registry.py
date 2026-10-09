@@ -38,8 +38,11 @@ def make_voucher(
     aud=None,
     jti=None,
     sign_key=None,
+    kid=None,
+    scopes=None,
+    jkt=None,
 ) -> str:
-    """Mint an operator-signed enrollment/revocation voucher for tests."""
+    """Mint an operator-signed enrollment/amend/revocation voucher for tests."""
     key = sign_key or _OPERATOR["key"]
     now = int(datetime.now(timezone.utc).timestamp())
     payload: dict = {
@@ -51,12 +54,20 @@ def make_voucher(
         "jti": jti or str(uuid.uuid4()),
         "purpose": purpose,
     }
-    if purpose == "enroll":
+    if purpose in ("enroll", "amend"):
         if capabilities is not None:
             payload["capabilities"] = capabilities
         if operator is not None:
             payload["operator"] = operator
-    header = {"alg": "EdDSA", "typ": "enrollment-voucher+jwt", "kid": _OPERATOR["kid"]}
+        if scopes is not None:
+            payload["scopes"] = scopes
+        if jkt is not None:
+            payload["cnf"] = {"jkt": jkt}
+    header = {
+        "alg": "EdDSA",
+        "typ": "enrollment-voucher+jwt",
+        "kid": kid if kid is not None else _OPERATOR["kid"],
+    }
     h = _b64url_json(header)
     p = _b64url_json(payload)
     sig = _b64url(key.sign(f"{h}.{p}".encode()))
@@ -102,14 +113,29 @@ def configure_test_env(tmp_path_factory):
     op_key = Ed25519PrivateKey.generate()
     raw = op_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     kid = _b64url(hashlib.sha256(raw).digest())[:16]
+    # A second, bounded issuer — the shape an always-on voucher signer gets.
+    ceiled_key = Ed25519PrivateKey.generate()
+    ceiled_raw = ceiled_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    ceiled_kid = _b64url(hashlib.sha256(ceiled_raw).digest())[:16]
     jwks_path = tmp / "operator_jwks.json"
     jwks_path.write_text(
-        json.dumps({"keys": [{"kty": "OKP", "crv": "Ed25519", "x": _b64url(raw), "kid": kid}]})
+        json.dumps({"keys": [
+            {"kty": "OKP", "crv": "Ed25519", "x": _b64url(raw), "kid": kid},
+            {
+                "kty": "OKP", "crv": "Ed25519", "x": _b64url(ceiled_raw), "kid": ceiled_kid,
+                "ceiling": {
+                    "capabilities": ["observe", "publish"],
+                    "scopes": ["us-ca-napa", "us-ca-sonoma"],
+                },
+            },
+        ]})
     )
     os.environ["OPERATOR_JWKS_PATH"] = str(jwks_path)
 
     _OPERATOR["key"] = op_key
     _OPERATOR["kid"] = kid
+    _OPERATOR["ceiled_key"] = ceiled_key
+    _OPERATOR["ceiled_kid"] = ceiled_kid
     _OPERATOR["registry_did"] = "did:web:test.example.com"
     yield
 
@@ -1050,3 +1076,298 @@ class TestJWTFormats:
         header = json.loads(base64.urlsafe_b64decode(header_b64 + ("=" * pad if pad != 4 else "")))
         assert header["typ"] == "kb+jwt"
         assert header["alg"] == "EdDSA"
+
+
+# ── Voucher v2: key binding, scopes, issuer ceilings ─────────────────────────
+
+def _new_agent():
+    from app.crypto import generate_ed25519_keypair
+    key, jwk = generate_ed25519_keypair()
+    return f"v2{uuid.uuid4().hex[:10]}", jwk, key
+
+
+def _enroll(client, agent_id, jwk, charter, **voucher_kw):
+    voucher = make_voucher(agent_id, **voucher_kw)
+    return client.post(
+        "/agents",
+        json={"agent_id": agent_id, "public_key_jwk": jwk, "charter": charter},
+        headers={"Authorization": f"Bearer {voucher}"},
+    )
+
+
+class TestVoucherKeyBinding:
+    def test_matching_jkt_accepted(self, client, sample_charter):
+        from app.crypto import jwk_thumbprint
+        agent_id, jwk, _ = _new_agent()
+        resp = _enroll(client, agent_id, jwk, sample_charter,
+                       capabilities=sample_charter["capabilities"], jkt=jwk_thumbprint(jwk))
+        assert resp.status_code == 201
+
+    def test_mismatched_jkt_rejected(self, client, sample_charter):
+        from app.crypto import generate_ed25519_keypair, jwk_thumbprint
+        agent_id, jwk, _ = _new_agent()
+        _, other_jwk = generate_ed25519_keypair()
+        resp = _enroll(client, agent_id, jwk, sample_charter,
+                       capabilities=sample_charter["capabilities"],
+                       jkt=jwk_thumbprint(other_jwk))
+        assert resp.status_code == 403
+        assert "cnf.jkt" in resp.json()["detail"]
+
+    def test_absent_jkt_still_accepted(self, client, sample_charter):
+        agent_id, jwk, _ = _new_agent()
+        resp = _enroll(client, agent_id, jwk, sample_charter,
+                       capabilities=sample_charter["capabilities"])
+        assert resp.status_code == 201
+
+    def test_thumbprint_ignores_kid(self):
+        from app.crypto import generate_ed25519_keypair, jwk_thumbprint
+        _, jwk = generate_ed25519_keypair()
+        assert jwk_thumbprint(jwk) == jwk_thumbprint({**jwk, "kid": "something-else"})
+
+
+class TestVoucherScopes:
+    def test_scopes_within_voucher_accepted(self, client, sample_charter):
+        agent_id, jwk, _ = _new_agent()
+        charter = {**sample_charter, "scopes": ["us-ca-sonoma"]}
+        resp = _enroll(client, agent_id, jwk, charter,
+                       capabilities=charter["capabilities"],
+                       scopes=["us-ca-sonoma", "us-ca-napa"])
+        assert resp.status_code == 201
+        assert resp.json()["charter_vc"]["credentialSubject"]["scopes"] == ["us-ca-sonoma"]
+
+    def test_scope_overclaim_rejected(self, client, sample_charter):
+        agent_id, jwk, _ = _new_agent()
+        charter = {**sample_charter, "scopes": ["us-ca"]}
+        resp = _enroll(client, agent_id, jwk, charter,
+                       capabilities=charter["capabilities"], scopes=["us-ca-sonoma"])
+        assert resp.status_code == 403
+
+    def test_bounded_scopes_must_be_declared(self, client, sample_charter):
+        """Absent scopes would read as unbounded, so a scoped voucher requires them."""
+        agent_id, jwk, _ = _new_agent()
+        resp = _enroll(client, agent_id, jwk, sample_charter,
+                       capabilities=sample_charter["capabilities"], scopes=["us-ca-sonoma"])
+        assert resp.status_code == 403
+        assert "must declare scopes" in resp.json()["detail"]
+
+    def test_service_qualified_capabilities_are_opaque(self, client, sample_charter):
+        agent_id, jwk, _ = _new_agent()
+        cap = "publish:dev.watershed-agent.observation"
+        charter = {**sample_charter, "capabilities": [cap]}
+        resp = _enroll(client, agent_id, jwk, charter, capabilities=[cap])
+        assert resp.status_code == 201
+
+
+class TestIssuerCeiling:
+    def _ceiled(self, client, agent_id, jwk, charter, **kw):
+        return _enroll(client, agent_id, jwk, charter,
+                       sign_key=_OPERATOR["ceiled_key"], kid=_OPERATOR["ceiled_kid"], **kw)
+
+    def test_voucher_within_ceiling_accepted(self, client, sample_charter):
+        agent_id, jwk, _ = _new_agent()
+        charter = {**sample_charter, "scopes": ["us-ca-napa"]}
+        resp = self._ceiled(client, agent_id, jwk, charter,
+                            capabilities=["observe", "publish"], scopes=["us-ca-napa"])
+        assert resp.status_code == 201
+
+    def test_voucher_exceeding_ceiling_rejected(self, client, sample_charter):
+        agent_id, jwk, _ = _new_agent()
+        charter = {**sample_charter, "capabilities": ["observe", "admin"],
+                   "scopes": ["us-ca-napa"]}
+        resp = self._ceiled(client, agent_id, jwk, charter,
+                            capabilities=["observe", "admin"], scopes=["us-ca-napa"])
+        assert resp.status_code == 403
+        assert "ceiling" in resp.json()["detail"]
+
+    def test_voucher_scope_exceeding_ceiling_rejected(self, client, sample_charter):
+        agent_id, jwk, _ = _new_agent()
+        charter = {**sample_charter, "scopes": ["us-ca-marin"]}
+        resp = self._ceiled(client, agent_id, jwk, charter,
+                            capabilities=["observe"], scopes=["us-ca-marin"])
+        assert resp.status_code == 403
+
+    def test_omitted_dimension_inherits_ceiling(self, client, sample_charter):
+        """A ceiled issuer's voucher with no caps is bounded by the ceiling, not open."""
+        agent_id, jwk, _ = _new_agent()
+        charter = {**sample_charter, "capabilities": ["observe", "admin"],
+                   "scopes": ["us-ca-napa"]}
+        resp = self._ceiled(client, agent_id, jwk, charter)  # no caps, no scopes
+        assert resp.status_code == 403
+        assert "admin" in resp.json()["detail"]
+
+
+# ── Charter reissue: renew and amend ─────────────────────────────────────────
+
+class TestCharterReissue:
+    @pytest.fixture()
+    def agent(self, client, sample_charter):
+        """A fresh agent with scopes, enrolled by the unbounded test operator."""
+        agent_id, jwk, key = _new_agent()
+        charter = {**sample_charter, "scopes": ["us-ca-napa"]}
+        resp = _enroll(client, agent_id, jwk, charter,
+                       capabilities=["observe", "publish"], scopes=["us-ca-napa"],
+                       operator="did:web:operator.example")
+        assert resp.status_code == 201
+        return agent_id, resp.json()["did"], key, jwk, resp.json()["charter_vc"]
+
+    @staticmethod
+    def _body(did, charter, key, iat=None):
+        from app.crypto import sign_document
+        iat = iat if iat is not None else int(datetime.now(timezone.utc).timestamp())
+        signed = sign_document(
+            {"did": did, "charter": charter, "iat": iat},
+            key, f"{did}#key-1", proof_purpose="authentication",
+        )
+        return {"charter": charter, "iat": iat, "proof": signed["proof"]}
+
+    @staticmethod
+    def _subject(vc):
+        return {k: v for k, v in vc["credentialSubject"].items() if k != "id"}
+
+    def _reissue(self, client, agent_id, body, voucher=None):
+        headers = {"Authorization": f"Bearer {voucher}"} if voucher else {}
+        return client.post(f"/agents/{agent_id}/charter", json=body, headers=headers)
+
+    def test_renew_same_charter(self, client, agent):
+        agent_id, did, key, jwk, vc = agent
+        resp = self._reissue(client, agent_id, self._body(did, self._subject(vc), key))
+        assert resp.status_code == 200
+        new_vc = resp.json()["charter_vc"]
+        assert resp.json()["did"] == did
+        assert new_vc["credentialSubject"]["id"] == did
+        assert new_vc["credentialStatus"] == vc["credentialStatus"]  # same status index
+        assert client.get(f"/agents/{agent_id}/did.json").json()["verificationMethod"][0][
+            "publicKeyJwk"]["x"] == jwk["x"]  # same key
+
+    def test_renew_may_narrow(self, client, agent):
+        agent_id, did, key, _, vc = agent
+        narrower = {**self._subject(vc), "capabilities": ["observe"]}
+        resp = self._reissue(client, agent_id, self._body(did, narrower, key))
+        assert resp.status_code == 200
+        assert resp.json()["charter_vc"]["credentialSubject"]["capabilities"] == ["observe"]
+
+    def test_renew_cannot_widen(self, client, agent):
+        agent_id, did, key, _, vc = agent
+        wider = {**self._subject(vc), "capabilities": ["observe", "publish", "admin"]}
+        resp = self._reissue(client, agent_id, self._body(did, wider, key))
+        assert resp.status_code == 403
+
+    def test_renew_cannot_drop_scopes(self, client, agent):
+        agent_id, did, key, _, vc = agent
+        unscoped = {k: v for k, v in self._subject(vc).items() if k != "scopes"}
+        resp = self._reissue(client, agent_id, self._body(did, unscoped, key))
+        assert resp.status_code == 403
+
+    def test_renew_cannot_change_operator(self, client, agent):
+        agent_id, did, key, _, vc = agent
+        spoofed = {**self._subject(vc), "operator": "did:web:someone-else.example"}
+        resp = self._reissue(client, agent_id, self._body(did, spoofed, key))
+        assert resp.status_code == 200
+        assert resp.json()["charter_vc"]["credentialSubject"]["operator"] == \
+            "did:web:operator.example"
+
+    def test_wrong_key_rejected(self, client, agent):
+        from app.crypto import generate_ed25519_keypair
+        agent_id, did, _, _, vc = agent
+        wrong, _ = generate_ed25519_keypair()
+        resp = self._reissue(client, agent_id, self._body(did, self._subject(vc), wrong))
+        assert resp.status_code == 403
+
+    def test_stale_iat_rejected(self, client, agent):
+        agent_id, did, key, _, vc = agent
+        old = int(datetime.now(timezone.utc).timestamp()) - 3600
+        resp = self._reissue(client, agent_id, self._body(did, self._subject(vc), key, iat=old))
+        assert resp.status_code == 403
+
+    def _expire(self, agent_id):
+        from sqlmodel import Session, select
+        from app.database import engine
+        from app.models import Agent
+        with Session(engine) as s:
+            a = s.exec(select(Agent).where(Agent.agent_id == agent_id)).one()
+            vc = json.loads(a.charter_vc)
+            vc["validUntil"] = "2000-01-01T00:00:00Z"
+            a.charter_vc = json.dumps(vc)
+            s.add(a)
+            s.commit()
+
+    def test_renew_after_expiry_needs_voucher(self, client, agent):
+        agent_id, did, key, _, vc = agent
+        self._expire(agent_id)
+        resp = self._reissue(client, agent_id, self._body(did, self._subject(vc), key))
+        assert resp.status_code == 403
+        assert "re-confirm" in resp.json()["detail"]
+
+    def test_amend_after_expiry_with_voucher(self, client, agent):
+        agent_id, did, key, _, vc = agent
+        self._expire(agent_id)
+        voucher = make_voucher(agent_id, purpose="amend", capabilities=["observe", "publish"],
+                               scopes=["us-ca-napa"], operator="did:web:operator.example")
+        resp = self._reissue(client, agent_id, self._body(did, self._subject(vc), key), voucher)
+        assert resp.status_code == 200
+        assert client.get(f"/agents/{agent_id}/attributes").json()["status"] == "active"
+
+    def test_amend_widens(self, client, agent):
+        agent_id, did, key, _, vc = agent
+        wider = {**self._subject(vc),
+                 "capabilities": ["observe", "publish", "publish:dev.example.other"],
+                 "scopes": ["us-ca-napa", "us-ca-sonoma"]}
+        voucher = make_voucher(agent_id, purpose="amend", capabilities=wider["capabilities"],
+                               scopes=wider["scopes"], operator="did:web:operator.example")
+        resp = self._reissue(client, agent_id, self._body(did, wider, key), voucher)
+        assert resp.status_code == 200
+        subject = resp.json()["charter_vc"]["credentialSubject"]
+        assert subject["scopes"] == ["us-ca-napa", "us-ca-sonoma"]
+        assert resp.json()["did"] == did
+
+    def test_amend_still_clamped_by_voucher(self, client, agent):
+        agent_id, did, key, _, vc = agent
+        wider = {**self._subject(vc), "capabilities": ["observe", "publish", "admin"]}
+        voucher = make_voucher(agent_id, purpose="amend", capabilities=["observe", "publish"],
+                               scopes=["us-ca-napa"], operator="did:web:operator.example")
+        resp = self._reissue(client, agent_id, self._body(did, wider, key), voucher)
+        assert resp.status_code == 403
+
+    def test_amend_from_other_operator_refused(self, client, agent):
+        agent_id, did, key, _, vc = agent
+        voucher = make_voucher(agent_id, purpose="amend", capabilities=["observe"],
+                               scopes=["us-ca-napa"], operator="did:web:other-operator.example")
+        resp = self._reissue(client, agent_id, self._body(did, self._subject(vc), key), voucher)
+        assert resp.status_code == 409
+
+    def test_enroll_voucher_cannot_amend(self, client, agent):
+        agent_id, did, key, _, vc = agent
+        voucher = make_voucher(agent_id, purpose="enroll", capabilities=["observe", "publish"])
+        resp = self._reissue(client, agent_id, self._body(did, self._subject(vc), key), voucher)
+        assert resp.status_code == 403
+
+    def test_amend_voucher_single_use(self, client, agent):
+        agent_id, did, key, _, vc = agent
+        voucher = make_voucher(agent_id, purpose="amend", capabilities=["observe", "publish"],
+                               scopes=["us-ca-napa"], operator="did:web:operator.example")
+        body = self._body(did, self._subject(vc), key)
+        assert self._reissue(client, agent_id, body, voucher).status_code == 200
+        body = self._body(did, self._subject(vc), key)
+        assert self._reissue(client, agent_id, body, voucher).status_code == 409
+
+    def test_amend_jkt_must_match_current_key(self, client, agent):
+        from app.crypto import generate_ed25519_keypair, jwk_thumbprint
+        agent_id, did, key, _, vc = agent
+        _, other = generate_ed25519_keypair()
+        voucher = make_voucher(agent_id, purpose="amend", capabilities=["observe", "publish"],
+                               scopes=["us-ca-napa"], jkt=jwk_thumbprint(other))
+        resp = self._reissue(client, agent_id, self._body(did, self._subject(vc), key), voucher)
+        assert resp.status_code == 403
+
+    def test_revoked_agent_refused(self, client, agent):
+        agent_id, did, key, _, vc = agent
+        revoke = make_voucher(agent_id, purpose="revoke")
+        assert client.delete(f"/agents/{agent_id}",
+                             headers={"Authorization": f"Bearer {revoke}"}).status_code == 200
+        resp = self._reissue(client, agent_id, self._body(did, self._subject(vc), key))
+        assert resp.status_code == 410
+
+    def test_unknown_agent_404(self, client, agent):
+        _, did, key, _, vc = agent
+        resp = self._reissue(client, "nosuchagent", self._body(did, self._subject(vc), key))
+        assert resp.status_code == 404

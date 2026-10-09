@@ -36,6 +36,7 @@ from app.config import (
     REQUIRE_ENROLLMENT_VOUCHER,
 )
 from app.crypto import (
+    jwk_thumbprint,
     load_or_create_private_key,
     public_key_to_jwk,
     sign_document,
@@ -53,6 +54,8 @@ from app.models import Agent, ConsumedVoucher
 from app.schemas import (
     AgentRegistrationRequest,
     AgentRegistrationResponse,
+    CharterReissueRequest,
+    CharterReissueResponse,
     KeyRotationRequest,
     KeyRotationResponse,
     VerificationRequest,
@@ -122,14 +125,17 @@ def _verify_grant(
     expected_agent_id: str,
     expected_purpose: str,
     session: Session,
+    always: bool = False,
 ) -> Optional[VoucherGrant]:
     """
     Verify an operator voucher for *expected_agent_id* and *expected_purpose*.
 
     Returns the grant, or None when voucher checks are disabled for local dev.
+    *always* verifies regardless of that switch, for endpoints where a voucher is
+    the only thing that can widen authority.
     Raises HTTPException(401/403/409) on any failure.
     """
-    if not REQUIRE_ENROLLMENT_VOUCHER:
+    if not REQUIRE_ENROLLMENT_VOUCHER and not always:
         return None
 
     token = _bearer_voucher(authorization)
@@ -161,6 +167,58 @@ def _verify_grant(
 def _consume(grant: Optional[VoucherGrant], session: Session) -> None:
     if grant is not None:
         session.add(ConsumedVoucher(jti=grant.jti, agent_id=grant.agent_id))
+
+
+def _check_key_binding(grant: Optional[VoucherGrant], public_key_jwk: dict) -> None:
+    """A voucher carrying cnf.jkt may only be used with that exact key."""
+    if grant is None or grant.jkt is None:
+        return
+    try:
+        presented = jwk_thumbprint(public_key_jwk)
+    except (KeyError, ValueError):
+        raise HTTPException(status_code=422, detail="public key is not a valid OKP JWK.")
+    if presented != grant.jkt:
+        raise HTTPException(
+            status_code=403,
+            detail="Voucher is bound to a different key (cnf.jkt mismatch).",
+        )
+
+
+def _clamp(
+    charter: dict,
+    name: str,
+    bound: Optional[list[str]],
+    source: str,
+    required: bool = False,
+) -> None:
+    """
+    Enforce charter[name] ⊆ bound.  The registry checks, it never fills in: the
+    agent asserts, the bound only limits.
+
+    *required* is for dimensions where absence would read as unbounded (scopes):
+    a bounded grant must then be matched by an explicit, narrower claim.
+    """
+    if bound is None:
+        return
+    claimed = charter.get(name)
+    if claimed is None:
+        if required:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Charter must declare {name} within the {source} ({sorted(bound)}).",
+            )
+        return
+    if not isinstance(claimed, list):
+        raise HTTPException(status_code=422, detail=f"Charter '{name}' must be a list.")
+    extra = [c for c in claimed if c not in set(bound)]
+    if extra:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Charter requests {name} {extra} not authorized by "
+                f"the {source} (allowed: {sorted(bound)})."
+            ),
+        )
 
 
 # ── Registry DID document ────────────────────────────────────────────────────
@@ -247,18 +305,9 @@ def register_agent(
     charter = dict(req.charter)
     # ── Clamp the charter to the voucher grant ────────────────────────────────
     if grant is not None:
-        requested_caps = charter.get("capabilities", []) or []
-        if grant.capabilities is not None:
-            allowed = set(grant.capabilities)
-            extra = [c for c in requested_caps if c not in allowed]
-            if extra:
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        f"Charter requests capabilities {extra} not authorized by "
-                        f"the voucher (allowed: {sorted(allowed)})."
-                    ),
-                )
+        _check_key_binding(grant, req.public_key_jwk)
+        _clamp(charter, "capabilities", grant.capabilities, "voucher")
+        _clamp(charter, "scopes", grant.scopes, "voucher", required=True)
         if grant.operator is not None:
             charter["operator"] = grant.operator
 
@@ -658,6 +707,126 @@ def rotate_agent_key(
         did_document=did_doc,
         charter_vc=new_charter_vc,
     )
+
+
+# ── Charter reissue (renew / amend) ───────────────────────────────────────────
+
+#: How far a reissue request's iat may drift from the registry's clock.
+_REISSUE_SKEW_SECONDS = 300
+
+
+@app.post(
+    "/agents/{agent_id}/charter",
+    response_model=CharterReissueResponse,
+    summary="Reissue an agent's charter (renew, or amend with a voucher)",
+    tags=["Agents"],
+)
+def reissue_charter(
+    agent_id: str,
+    req: CharterReissueRequest,
+    session: SessionDep,
+    authorization: Annotated[Optional[str], Header()] = None,
+) -> CharterReissueResponse:
+    """
+    Issue a fresh charter for an existing agent.  Same DID, same key, same status
+    index, so pins and bindings held by consumers survive.
+
+    Authenticated by the agent: a proof over {did, charter, iat} signed with its
+    current key.
+
+    - **Renew** (no voucher): the new charter may only match or narrow the current
+      one, and only while the current charter is still active.  Once it has
+      expired, the operator must re-confirm with a voucher.  A credential should
+      not outlive the context it was decided on.
+    - **Amend** (``Authorization: Bearer <voucher>``, purpose ``amend``): the new
+      charter is bounded by the voucher instead, so it may widen.  Expired
+      charters can be amended; that *is* the operator re-confirming.
+
+    One charter per operator is the intended model; until it exists, an amend
+    voucher from a different operator than the current charter's is refused.
+    """
+    agent = session.exec(select(Agent).where(Agent.agent_id == agent_id)).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+    if agent.revoked_at:
+        raise HTTPException(status_code=410, detail="Agent has been revoked.")
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    if abs(now - req.iat) > _REISSUE_SKEW_SECONDS:
+        raise HTTPException(status_code=403, detail="Reissue request is stale (iat).")
+
+    signed_doc = {"did": agent.did, "charter": req.charter, "iat": req.iat, "proof": req.proof}
+    if not verify_document_proof(signed_doc, agent.get_public_key_jwk()):
+        raise HTTPException(
+            status_code=403,
+            detail="Reissue proof is invalid — must be signed by the current key.",
+        )
+
+    current = {
+        k: v
+        for k, v in agent.get_charter_vc().get("credentialSubject", {}).items()
+        if k != "id"
+    }
+    charter = {k: v for k, v in req.charter.items() if k != "id"}
+
+    grant: Optional[VoucherGrant] = None
+    if authorization:
+        grant = _verify_grant(authorization, agent_id, "amend", session, always=True)
+        _check_key_binding(grant, agent.get_public_key_jwk())
+        current_operator = current.get("operator")
+        if (
+            grant.operator is not None
+            and current_operator is not None
+            and grant.operator != current_operator
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Amend voucher is from a different operator than the current "
+                    "charter; multi-operator charters are not yet supported."
+                ),
+            )
+        _clamp(charter, "capabilities", grant.capabilities, "voucher")
+        _clamp(charter, "scopes", grant.scopes, "voucher", required=True)
+        operator = grant.operator or current_operator
+    else:
+        if _agent_status(agent) != "active":
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Charter has expired; renewal needs the operator to re-confirm "
+                    "with an 'amend' voucher."
+                ),
+            )
+        _clamp(charter, "capabilities", current.get("capabilities") or [], "current charter")
+        _clamp(charter, "scopes", current.get("scopes"), "current charter", required=True)
+        operator = current.get("operator")
+
+    # The operator is never the agent's to assert on reissue.
+    charter.pop("operator", None)
+    if operator is not None:
+        charter["operator"] = operator
+
+    credential_status = (
+        credential_status_entry(STATUS_LIST_URL, agent.status_index)
+        if agent.status_index is not None
+        else None
+    )
+    charter_vc = issue_charter_vc(
+        agent_did=agent.did,
+        charter=charter,
+        issuer_did=_registry_did,
+        registry_private_key=_registry_private_key,
+        verification_method=f"{_registry_did}#key-1",
+        ttl_days=CHARTER_TTL_DAYS,
+        credential_status=credential_status,
+    )
+    agent.charter_vc = json.dumps(charter_vc)
+    session.add(agent)
+    _consume(grant, session)
+    session.commit()
+
+    return CharterReissueResponse(did=agent.did, charter_vc=charter_vc)
 
 
 # ── Revocation ────────────────────────────────────────────────────────────────

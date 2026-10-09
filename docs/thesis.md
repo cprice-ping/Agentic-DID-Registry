@@ -17,6 +17,9 @@ argument before it starts: say agents need identity and people hear that agents 
 accounts. What a service actually wants to know is what this thing is and what it is
 for, not who it is.
 
+The organising rule, if there is one, is to make each decision at the boundary where
+its context exists. See [Decide where the context is](#decide-where-the-context-is).
+
 ## The mistake we're not repeating
 
 Human identity ended up owned by IdPs ("log in with Google") for a practical
@@ -257,6 +260,74 @@ from the ReBAC store).
 Nothing in the middle is new. The registry supplies the agent side, the human side
 is a solved system you already run, and the PDP intersects them. What's left is
 modeling the delegation in the ReBAC store and writing the intersection policy.
+
+## Decide where the context is
+
+Every hop in this system is a boundary, and at each boundary there is a decision that
+can only be made well there, because that is where its context exists. The mechanism
+at the boundary is incidental. Token exchange at a service, an OAuth on-behalf-of
+flow, a PDS issuing a session, a presentation verified offline: these are shapes a
+boundary can take. Different decisions with different context get made at the right
+time, and none of them tries to make a decision that belongs somewhere else.
+
+| Boundary | Decision | Context only available here |
+|---|---|---|
+| Operator → voucher | what this workload is for | the operator's intent and accountability |
+| Registry enrolment | charter ≤ voucher | the voucher and the agent's key, together |
+| Service, first contact | accept it? which local account? pin the key | the service's own policy, the presented charter |
+| Service session | which actions, for how long | the charter's status now, the pinned key |
+| Reader / AppView | does this record count? | the record, its author's charter, the reader's purpose |
+| Service OBO | what this request may do | the human, their grant, the request itself |
+
+Each row decides what it has the context for and passes a narrower bound forward, not
+a final verdict.
+
+### The chain only narrows
+
+Read as a sequence, the same join happens more than once:
+
+```
+workload (who) ⨝ operator ceiling  →  charter      ≤ voucher
+charter ⨝ human grant ⨝ policy     →  OBO token    ≤ charter ∩ grant
+OBO token → downstream agent       →  smaller one  ≤ OBO token
+```
+
+The charter is itself an on-behalf-of credential: the workload acts, and the operator
+is the principal. At request time a second principal joins, the human, so the PDP is
+intersecting three bounds: the operator's ceiling as carried by the charter, the
+human's grant, and the service's policy. No step can create authority the previous
+step didn't have. That invariant is worth more than any single endpoint, and it is
+the thing to test.
+
+### Three ways to get it wrong
+
+- Too early. Deciding before the context is visible. The trusted-issuer gate at a
+  token endpoint decides trust before the claims are decision input (see
+  [Exchange or presentation](#exchange-or-presentation)).
+- In the wrong place. Deciding where the context never arrives. The registry deciding
+  a service's policy is the standing example, and it is what
+  [scope-and-boundaries.md](scope-and-boundaries.md) exists to prevent.
+- Past the context. Relying on a decision after the context that justified it has
+  changed: a charter cache that keeps serving a revoked agent until its TTL runs out.
+
+### Lifetime follows context
+
+A credential should live as long as the context its decision was made on stays true.
+An operator's ceiling changes rarely, so a charter lasts months. Charter status can
+change at any moment, so a session at a service lasts minutes. A human's request
+context is gone in seconds, so the OBO token is short. Revocation covers context that
+changes before the lifetime runs out. An expired charter whose context still holds is
+the reverse failure, which is why renewal exists.
+
+### The registry is an exchange, and that is fine
+
+The registry validates a voucher and then mints a charter: it decides before it
+issues, which is the pattern the next section is wary of. It is the right choice
+here because the result is a standing fact ("this workload, for this operator, up to
+this ceiling"), and standing facts are worth settling once and signing. Contextual
+decisions ("may it do this, now, for this person") belong at presentation, where the
+context is. The test is not exchange versus presentation. It is whether the context
+the decision needs is present at the moment it is made.
 
 ## Exchange or presentation
 
